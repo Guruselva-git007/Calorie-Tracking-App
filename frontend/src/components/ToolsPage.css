@@ -1,0 +1,167 @@
+.tools-page {
+  display: grid;
+  gap: 12px;
+}
+
+.tools-config-panel,
+.tools-results-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.tools-form {
+  display: grid;
+  gap: 10px;
+}
+
+.tools-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tools-label {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.tools-grid-two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tools-form input,
+.tools-form select {
+  width: 100%;
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  padding: 10px 11px;
+  font-family: inherit;
+  background: var(--input-bg);
+  color: var(--input-text);
+}
+
+.chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.chip.active {
+  border-color: var(--brand-soft);
+  background: linear-gradient(120deg, var(--brand-main), var(--brand-alt));
+  color: var(--button-brand-text);
+}
+
+@media (hover: hover) {
+  .chip:hover {
+    transform: translateY(-1px);
+    border-color: var(--line-strong);
+  }
+}
+
+.inline-input-row {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.tools-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bmi-box {
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface-2);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.bmi-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.bmi-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.bmi-head small {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.recommendation-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+  padding: 10px;
+  display: grid;
+  gap: 5px;
+  transition: transform var(--motion-fast) var(--ease-out-soft),
+    border-color var(--motion-fast) var(--ease-out-soft),
+    box-shadow var(--motion-fast) var(--ease-out-soft);
+}
+
+@media (hover: hover) {
+  .recommendation-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--line-strong);
+    box-shadow: var(--shadow);
+  }
+}
+
+.recommendation-card h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.recommendation-compact-row {
+  display: grid;
+  gap: 3px;
+}
+
+.recommendation-compact-row small {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1120px) {
+  .tools-result-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 840px) {
+  .tools-columns,
+  .tools-grid-two,
+  .inline-input-row,
+  .tools-result-grid {
+    grid-template-columns: 1fr;
+  }
+}

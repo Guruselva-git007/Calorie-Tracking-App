@@ -1,0 +1,215 @@
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: clamp(14px, 4vw, 30px);
+}
+
+.login-card {
+  width: min(760px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  background: linear-gradient(160deg, var(--surface-1), var(--surface-2));
+  box-shadow: var(--shadow-strong);
+  padding: clamp(16px, 3.5vw, 28px);
+  display: grid;
+  gap: 13px;
+  position: relative;
+  overflow: hidden;
+}
+
+.login-card::after {
+  content: '';
+  position: absolute;
+  inset: auto -14% -38% auto;
+  width: 42%;
+  aspect-ratio: 1;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(103, 174, 226, 0.24), rgba(103, 174, 226, 0));
+  pointer-events: none;
+}
+
+@media (hover: hover) {
+  .login-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 24px 52px rgba(10, 26, 44, 0.25);
+  }
+}
+
+.login-eyebrow {
+  margin: 0;
+  color: var(--brand-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-family: 'Newsreader', Georgia, serif;
+  font-size: clamp(1.7rem, 4vw, 2.2rem);
+}
+
+.login-subtitle {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  max-width: 660px;
+}
+
+.login-mode-switch {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  padding: 4px;
+}
+
+.login-mode-switch button {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.login-mode-switch button.active {
+  background: linear-gradient(120deg, var(--brand-main), var(--brand-alt));
+  color: var(--button-brand-text);
+}
+
+.login-form {
+  display: grid;
+  gap: 10px;
+}
+
+.login-grid-two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.login-form input {
+  width: 100%;
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  padding: 11px 12px;
+  font-family: inherit;
+  background: var(--input-bg);
+  color: var(--input-text);
+}
+
+.login-code-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.login-code-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.login-code-head small {
+  color: var(--text-muted);
+}
+
+.login-dev-otp {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: var(--surface-highlight);
+  color: var(--text-main);
+  padding: 10px;
+  display: grid;
+  gap: 4px;
+  font-size: 0.88rem;
+}
+
+.login-dev-otp strong {
+  font-size: 1.1rem;
+}
+
+.login-dev-otp small {
+  color: var(--text-muted);
+}
+
+.login-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.login-backend-state {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  width: fit-content;
+  padding: 5px 11px;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.login-backend-state.is-up {
+  border-color: rgba(28, 144, 101, 0.5);
+  color: var(--ok);
+  background: rgba(17, 146, 109, 0.08);
+}
+
+.login-backend-state.is-down {
+  border-color: rgba(198, 59, 75, 0.44);
+  color: var(--danger);
+  background: rgba(198, 59, 75, 0.09);
+}
+
+.ghost-btn {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text-main);
+  padding: 10px 12px;
+  font-weight: 600;
+}
+
+@media (hover: hover) {
+  .ghost-btn:hover {
+    border-color: var(--line-strong);
+    background: var(--surface-3);
+    transform: translateY(-1px);
+  }
+}
+
+.login-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.login-hint-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.login-retry-btn {
+  padding: 7px 10px;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 760px) {
+  .login-grid-two {
+    grid-template-columns: 1fr;
+  }
+}

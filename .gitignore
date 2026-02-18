@@ -1,0 +1,25 @@
+# Backend
+backend/target/
+backend/.mvn/
+backend/mvnw
+backend/mvnw.cmd
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.env
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+
+# Runtime / generated
+.run/
+.mysql-data/
+backend/media/
+*.log
+.snapshots/
