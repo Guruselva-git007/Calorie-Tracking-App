@@ -20,6 +20,7 @@ public class IngredientResponse {
     private String servingNote;
     private Boolean factChecked;
     private String source;
+    private Boolean personalized = false;
     private List<String> aliases = new ArrayList<>();
     private List<String> regionalAvailability = new ArrayList<>();
     private String imageUrl;
@@ -134,6 +135,14 @@ public class IngredientResponse {
 
     public void setSource(String source) {
         this.source = source;
+    }
+
+    public Boolean getPersonalized() {
+        return personalized;
+    }
+
+    public void setPersonalized(Boolean personalized) {
+        this.personalized = personalized;
     }
 
     public List<String> getAliases() {

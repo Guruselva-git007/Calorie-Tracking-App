@@ -17,6 +17,7 @@ public class DishResponse {
     private Double estimatedPriceUsdPerServing;
     private Boolean factChecked;
     private String source;
+    private Boolean personalized = false;
     private String imageUrl;
     private List<DishComponentResponse> components = new ArrayList<>();
 
@@ -114,6 +115,14 @@ public class DishResponse {
 
     public void setSource(String source) {
         this.source = source;
+    }
+
+    public Boolean getPersonalized() {
+        return personalized;
+    }
+
+    public void setPersonalized(Boolean personalized) {
+        this.personalized = personalized;
     }
 
     public String getImageUrl() {

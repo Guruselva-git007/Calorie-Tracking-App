@@ -317,6 +317,25 @@ export const dishAPI = {
   createCustom: (payload) => withSearchCacheInvalidation(client.post('/dishes/custom', payload))
 };
 
+export const personalizationAPI = {
+  saveIngredient: (ingredientId, payload) =>
+    withSearchCacheInvalidation(client.post(`/personalization/ingredient/${ingredientId}`, payload)),
+  revertIngredient: (ingredientId) =>
+    withSearchCacheInvalidation(client.delete(`/personalization/ingredient/${ingredientId}`)),
+  saveDish: (dishId, payload) =>
+    withSearchCacheInvalidation(client.post(`/personalization/dish/${dishId}`, payload)),
+  revertDish: (dishId) =>
+    withSearchCacheInvalidation(client.delete(`/personalization/dish/${dishId}`))
+};
+
+export const searchActivityAPI = {
+  record: (payload) => client.post('/search-activity/record', payload),
+  recent: (limit = 16) =>
+    client.get('/search-activity/recent', {
+      params: { limit }
+    })
+};
+
 export const entryAPI = {
   getAll: (userId) => client.get('/entries', { params: { userId } }),
   getToday: (userId) => client.get('/entries/today', { params: { userId } }),

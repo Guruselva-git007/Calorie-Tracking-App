@@ -488,6 +488,35 @@
   font-weight: 600;
 }
 
+.personalized-star {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  margin-left: 4px;
+  font-size: 0.62rem;
+  line-height: 1;
+  color: #2f1f00;
+  background: radial-gradient(circle at 30% 28%, rgba(255, 255, 255, 0.95), rgba(255, 221, 126, 0.9) 44%, rgba(184, 123, 20, 0.94));
+  border: 1px solid rgba(214, 160, 54, 0.65);
+  box-shadow: 0 2px 8px rgba(201, 129, 21, 0.28);
+}
+
+.suggestion-muted {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.recent-suggestions {
+  max-height: 370px;
+}
+
+.recent-suggestions-inline {
+  max-height: 260px;
+}
+
 .suggestion-meta-row {
   display: flex;
   align-items: center;
@@ -929,6 +958,57 @@
   padding: 6px 8px;
 }
 
+.account-customization-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.account-customization-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.account-customization-head strong {
+  color: var(--text-main);
+  font-size: 0.87rem;
+}
+
+.account-customization-card > small {
+  color: var(--text-muted);
+  font-size: 0.77rem;
+}
+
+.account-customization-body {
+  display: grid;
+  gap: 8px;
+}
+
+.account-customization-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.account-customization-grid label {
+  font-size: 0.76rem;
+}
+
+.account-customization-grid input {
+  margin-top: 4px;
+}
+
+.account-customization-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .preview-box.preview-box-pop {
   border-radius: 16px;
   border: 1px solid var(--preview-border);
@@ -1087,6 +1167,10 @@
     grid-template-columns: 1fr;
   }
 
+  .account-customization-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .mini-actions {
     justify-content: flex-start;
   }
@@ -1176,5 +1260,14 @@
 
   .scan-alt-actions .secondary-btn {
     width: 100%;
+  }
+
+  .account-customization-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .account-customization-head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }

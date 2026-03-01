@@ -37,17 +37,20 @@ public class EntryService {
     private final UserService userService;
     private final IngredientService ingredientService;
     private final DishService dishService;
+    private final UserFoodCustomizationService userFoodCustomizationService;
 
     public EntryService(
         CalorieEntryRepository calorieEntryRepository,
         UserService userService,
         IngredientService ingredientService,
-        DishService dishService
+        DishService dishService,
+        UserFoodCustomizationService userFoodCustomizationService
     ) {
         this.calorieEntryRepository = calorieEntryRepository;
         this.userService = userService;
         this.ingredientService = ingredientService;
         this.dishService = dishService;
+        this.userFoodCustomizationService = userFoodCustomizationService;
     }
 
     @Transactional(readOnly = true)
@@ -68,6 +71,7 @@ public class EntryService {
     public EntryResponse createIngredientEntry(CreateIngredientEntryRequest request) {
         AppUser user = userService.getUserOrThrow(request.getUserId());
         Ingredient ingredient = ingredientService.getIngredientOrThrow(request.getIngredientId());
+        UserFoodCustomizationService.NutritionMetrics metrics = userFoodCustomizationService.resolveIngredientMetrics(user, ingredient);
         double quantity = request.getQuantity() == null ? 0.0 : request.getQuantity();
         String unit = request.getUnit() == null ? "g" : request.getUnit().trim().toLowerCase();
 
@@ -96,7 +100,7 @@ public class EntryService {
         entry.setDisplayName(ingredient.getName());
         entry.setQuantity(CalorieMath.round(quantity));
         entry.setQuantityUnit(unit);
-        entry.setTotalCalories(CalorieMath.caloriesFromGrams(ingredient.getCaloriesPer100g(), grams));
+        entry.setTotalCalories(CalorieMath.caloriesFromGrams(valueOrZero(metrics.calories()), grams));
         entry.setEntryDate(request.getEntryDate() == null ? LocalDate.now() : request.getEntryDate());
 
         return toResponse(calorieEntryRepository.save(entry));
@@ -107,22 +111,38 @@ public class EntryService {
         AppUser user = userService.getUserOrThrow(request.getUserId());
         Dish dish = dishService.getDishOrThrow(request.getDishId());
 
-        CalculationResponse calculation = dishService.calculateDishCalories(
-            request.getDishId(),
-            request.getServings(),
-            request.getCustomIngredients()
-        );
-
         boolean isCustom = request.getCustomIngredients() != null && !request.getCustomIngredients().isEmpty();
+        double servings = request.getServings();
+        double totalCalories;
+        if (isCustom) {
+            CalculationResponse calculation = dishService.calculateDishCalories(
+                request.getDishId(),
+                servings,
+                request.getCustomIngredients()
+            );
+            totalCalories = valueOrZero(calculation.getTotalCalories());
+        } else {
+            CalculationResponse perServingCalculation = dishService.calculateDishCalories(
+                request.getDishId(),
+                1.0,
+                null
+            );
+            UserFoodCustomizationService.NutritionMetrics perServingMetrics = userFoodCustomizationService.resolveDishMetrics(
+                user,
+                dish,
+                toMetrics(perServingCalculation)
+            );
+            totalCalories = valueOrZero(perServingMetrics.calories()) * servings;
+        }
 
         CalorieEntry entry = new CalorieEntry();
         entry.setUser(user);
         entry.setDish(dish);
         entry.setType(isCustom ? EntryType.CUSTOM_DISH : EntryType.DISH);
         entry.setDisplayName(isCustom ? dish.getName() + " (custom)" : dish.getName());
-        entry.setQuantity(CalorieMath.round(request.getServings()));
+        entry.setQuantity(CalorieMath.round(servings));
         entry.setQuantityUnit("servings");
-        entry.setTotalCalories(calculation.getTotalCalories());
+        entry.setTotalCalories(CalorieMath.round(totalCalories));
         entry.setEntryDate(request.getEntryDate() == null ? LocalDate.now() : request.getEntryDate());
         entry.setNote(request.getNote());
 
@@ -163,10 +183,11 @@ public class EntryService {
                     continue;
                 }
                 double factor = grams / 100.0;
-                protein += valueOrZero(ingredient.getProteinPer100g()) * factor;
-                carbs += valueOrZero(ingredient.getCarbsPer100g()) * factor;
-                fats += valueOrZero(ingredient.getFatsPer100g()) * factor;
-                fiber += valueOrZero(ingredient.getFiberPer100g()) * factor;
+                UserFoodCustomizationService.NutritionMetrics metrics = userFoodCustomizationService.resolveIngredientMetrics(entry.getUser(), ingredient);
+                protein += valueOrZero(metrics.protein()) * factor;
+                carbs += valueOrZero(metrics.carbs()) * factor;
+                fats += valueOrZero(metrics.fats()) * factor;
+                fiber += valueOrZero(metrics.fiber()) * factor;
                 continue;
             }
 
@@ -177,11 +198,24 @@ public class EntryService {
                     servings = 1.0;
                 }
                 try {
-                    CalculationResponse dishCalculation = dishService.calculateDishCalories(dish.getId(), servings, null);
-                    protein += valueOrZero(dishCalculation.getTotalProtein());
-                    carbs += valueOrZero(dishCalculation.getTotalCarbs());
-                    fats += valueOrZero(dishCalculation.getTotalFats());
-                    fiber += valueOrZero(dishCalculation.getTotalFiber());
+                    if (entry.getType() == EntryType.CUSTOM_DISH) {
+                        CalculationResponse dishCalculation = dishService.calculateDishCalories(dish.getId(), servings, null);
+                        protein += valueOrZero(dishCalculation.getTotalProtein());
+                        carbs += valueOrZero(dishCalculation.getTotalCarbs());
+                        fats += valueOrZero(dishCalculation.getTotalFats());
+                        fiber += valueOrZero(dishCalculation.getTotalFiber());
+                    } else {
+                        CalculationResponse perServingCalculation = dishService.calculateDishCalories(dish.getId(), 1.0, null);
+                        UserFoodCustomizationService.NutritionMetrics perServingMetrics = userFoodCustomizationService.resolveDishMetrics(
+                            entry.getUser(),
+                            dish,
+                            toMetrics(perServingCalculation)
+                        );
+                        protein += valueOrZero(perServingMetrics.protein()) * servings;
+                        carbs += valueOrZero(perServingMetrics.carbs()) * servings;
+                        fats += valueOrZero(perServingMetrics.fats()) * servings;
+                        fiber += valueOrZero(perServingMetrics.fiber()) * servings;
+                    }
                 } catch (RuntimeException exception) {
                     // Keep summary resilient even if a dish was removed or cannot be recalculated.
                 }
@@ -226,6 +260,21 @@ public class EntryService {
 
     private static double valueOrZero(Double value) {
         return value == null ? 0.0 : value;
+    }
+
+    private UserFoodCustomizationService.NutritionMetrics toMetrics(CalculationResponse response) {
+        if (response == null) {
+            return new UserFoodCustomizationService.NutritionMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        }
+        return new UserFoodCustomizationService.NutritionMetrics(
+            response.getTotalCalories(),
+            response.getTotalProtein(),
+            response.getTotalCarbs(),
+            response.getTotalFats(),
+            response.getTotalFiber(),
+            response.getEstimatedTotalPriceUsd(),
+            false
+        );
     }
 
     private double toIngredientGrams(Ingredient ingredient, double quantity, String unit) {

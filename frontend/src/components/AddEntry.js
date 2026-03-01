@@ -1,5 +1,5 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { dishAPI, entryAPI, ingredientAPI, toolsAPI } from '../services/api';
+import { dishAPI, entryAPI, ingredientAPI, personalizationAPI, searchActivityAPI, toolsAPI } from '../services/api';
 import {
   buildFoodPlaceholderDataUrl,
   UNIT_OPTIONS,
@@ -95,6 +95,37 @@ const FoodThumb = ({ item, label, bucket = 'food', className = 'food-thumb' }) =
     />
   );
 };
+
+const PersonalizedBadge = ({ active }) =>
+  active ? (
+    <span className="personalized-star" title="Personalized nutrition for your account" aria-label="Personalized">
+      ★
+    </span>
+  ) : null;
+
+const toCustomizationDraft = (item, type) => {
+  if (!item) {
+    return CUSTOM_NUTRITION_DEFAULTS;
+  }
+  const isDish = type === 'dish';
+  return {
+    calories: formatAmount(isDish ? item.caloriesPerServing : item.caloriesPer100g),
+    protein: formatAmount(isDish ? item.proteinPerServing : item.proteinPer100g),
+    carbs: formatAmount(isDish ? item.carbsPerServing : item.carbsPer100g),
+    fats: formatAmount(isDish ? item.fatsPerServing : item.fatsPer100g),
+    fiber: formatAmount(isDish ? item.fiberPerServing : item.fiberPer100g),
+    priceInr: formatAmount(parseNumber(isDish ? item.estimatedPriceUsdPerServing : item.averagePriceUsd) * 83)
+  };
+};
+
+const toCustomizationPayload = (draft) => ({
+  calories: parseNumber(draft?.calories, 0),
+  protein: parseNumber(draft?.protein, 0),
+  carbs: parseNumber(draft?.carbs, 0),
+  fats: parseNumber(draft?.fats, 0),
+  fiber: parseNumber(draft?.fiber, 0),
+  priceInr: parseNumber(draft?.priceInr, 0)
+});
 
 const toCustomRowFromComponent = (component) => ({
   key: `${component.ingredientId}-${Math.random().toString(16).slice(2)}`,
@@ -321,6 +352,15 @@ const CUSTOM_PRESET_DEFAULTS = {
   fatsPer100g: 1,
   fiberPer100g: 0,
   averagePriceUsd: 3
+};
+
+const CUSTOM_NUTRITION_DEFAULTS = {
+  calories: '',
+  protein: '',
+  carbs: '',
+  fats: '',
+  fiber: '',
+  priceInr: ''
 };
 
 const BUILT_IN_INSTANT_PRESETS = [
@@ -1050,6 +1090,15 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
   const [customSelection, setCustomSelection] = useState(null);
   const [customQuantity, setCustomQuantity] = useState(100);
   const [customUnit, setCustomUnit] = useState('g');
+  const [recentIngredients, setRecentIngredients] = useState([]);
+  const [recentDishes, setRecentDishes] = useState([]);
+  const [recentLoading, setRecentLoading] = useState(false);
+
+  const [customizationOpen, setCustomizationOpen] = useState(false);
+  const [customizationTarget, setCustomizationTarget] = useState(null);
+  const [customizationDraft, setCustomizationDraft] = useState(CUSTOM_NUTRITION_DEFAULTS);
+  const [customizationBusy, setCustomizationBusy] = useState(false);
+  const [customizationStatus, setCustomizationStatus] = useState('');
 
   const [dishCalculation, setDishCalculation] = useState(null);
 
@@ -1094,6 +1143,28 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
   const SpeechRecognitionCtor =
     typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition || null) : null;
   const canUseVoiceRecognition = Boolean(SpeechRecognitionCtor);
+
+  const recordSearchActivity = async (itemType, item) => {
+    if (!item?.id) {
+      return;
+    }
+
+    try {
+      await searchActivityAPI.record({
+        itemType: String(itemType || '').toUpperCase(),
+        itemId: item.id,
+        itemName: item.name || ''
+      });
+    } catch (error) {
+      // Keep quick logger smooth even if activity logging fails.
+    }
+
+    if (String(itemType).toLowerCase() === 'ingredient') {
+      setRecentIngredients((previous) => [item, ...previous.filter((entry) => entry?.id !== item.id)].slice(0, 8));
+    } else if (String(itemType).toLowerCase() === 'dish') {
+      setRecentDishes((previous) => [item, ...previous.filter((entry) => entry?.id !== item.id)].slice(0, 8));
+    }
+  };
 
   const allInstantPresets = useMemo(
     () => [...customInstantPresets, ...BUILT_IN_INSTANT_PRESETS].map((preset, index) => normalizeInstantPreset(preset, index)).filter(Boolean),
@@ -1146,6 +1217,92 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
       setInstantAdvancedOpen(false);
     }
   }, [mode]);
+
+  useEffect(() => {
+    if (!customizationOpen) {
+      return;
+    }
+    if (!customizationContext?.item?.id) {
+      setCustomizationOpen(false);
+      setCustomizationTarget(null);
+      setCustomizationStatus('');
+      return;
+    }
+    if (
+      customizationTarget?.id !== customizationContext.item.id
+      || customizationTarget?.type !== customizationContext.type
+    ) {
+      setCustomizationTarget({ type: customizationContext.type, id: customizationContext.item.id });
+      setCustomizationDraft(toCustomizationDraft(customizationContext.item, customizationContext.type));
+      setCustomizationStatus('');
+    }
+  }, [customizationOpen, customizationContext, customizationTarget]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadRecentActivity = async () => {
+      setRecentLoading(true);
+      try {
+        const response = await searchActivityAPI.recent(18);
+        const recentItems = Array.isArray(response?.data) ? response.data : [];
+        const recentIngredientRefs = recentItems.filter((item) => String(item?.itemType || '').toUpperCase() === 'INGREDIENT').slice(0, 10);
+        const recentDishRefs = recentItems.filter((item) => String(item?.itemType || '').toUpperCase() === 'DISH').slice(0, 10);
+
+        const [ingredientResults, dishResults] = await Promise.all([
+          Promise.all(
+            recentIngredientRefs.map(async (item) => {
+              try {
+                const result = await ingredientAPI.get(item.itemId);
+                return result?.data || null;
+              } catch (error) {
+                return null;
+              }
+            })
+          ),
+          Promise.all(
+            recentDishRefs.map(async (item) => {
+              try {
+                const result = await dishAPI.get(item.itemId);
+                return result?.data || null;
+              } catch (error) {
+                return null;
+              }
+            })
+          )
+        ]);
+
+        if (!mounted) {
+          return;
+        }
+
+        setRecentIngredients(ingredientResults.filter(Boolean).slice(0, 8));
+        setRecentDishes(dishResults.filter(Boolean).slice(0, 8));
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        setRecentIngredients([]);
+        setRecentDishes([]);
+      } finally {
+        if (mounted) {
+          setRecentLoading(false);
+        }
+      }
+    };
+
+    if (userId) {
+      void loadRecentActivity();
+    } else {
+      setRecentIngredients([]);
+      setRecentDishes([]);
+      setRecentLoading(false);
+    }
+
+    return () => {
+      mounted = false;
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (instantTimerRef.current) {
@@ -1546,6 +1703,31 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
 
   const displayedPreview = mode === 'dish' ? dishPreview : mode === 'ingredient' ? ingredientPreview : instantPreview;
 
+  const customizationContext = useMemo(() => {
+    if (mode === 'dish' && selectedDish?.id) {
+      return {
+        type: 'dish',
+        item: selectedDish
+      };
+    }
+
+    if (mode === 'ingredient' && selectedIngredient?.id) {
+      return {
+        type: 'ingredient',
+        item: selectedIngredient
+      };
+    }
+
+    if (mode === 'instant' && selectedInstant?.ingredient?.id) {
+      return {
+        type: 'ingredient',
+        item: selectedInstant.ingredient
+      };
+    }
+
+    return null;
+  }, [mode, selectedDish, selectedIngredient, selectedInstant]);
+
   const instantSuggestionsVisible = useMemo(() => {
     const normalizedQuery = normalizeText(deferredInstantQuery);
     if (normalizedQuery.length < 2) {
@@ -1742,6 +1924,7 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
     setInstantPresetSuggestions([]);
     setInstantIngredientSuggestions([]);
     setInstantDishSuggestions([]);
+    void recordSearchActivity('ingredient', ingredient);
   };
 
   const selectInstantIngredient = (ingredient) => {
@@ -1758,6 +1941,7 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
     setInstantIngredientSuggestions([]);
     setInstantDishSuggestions([]);
     setStatus('Scanned food ready to log.');
+    void recordSearchActivity('ingredient', ingredient);
   };
 
   const stopLiveScan = () => {
@@ -2184,6 +2368,7 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
     setSelectedIngredient(ingredient);
     setIngredientQuery(ingredient.name);
     setIngredientSuggestions([]);
+    void recordSearchActivity('ingredient', ingredient);
   };
 
   const applySelectedDish = (dishData, withCustomize) => {
@@ -2214,6 +2399,7 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
       if (requestId === dishDetailQueryIdRef.current) {
         applySelectedDish(cachedDish, withCustomize);
         setDishLoading(false);
+        void recordSearchActivity('dish', cachedDish);
       }
       return;
     }
@@ -2229,12 +2415,14 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
         saveCacheEntry(dishDetailCacheRef.current, fullDish.id, fullDish, 120);
       }
       applySelectedDish(fullDish, withCustomize);
+      void recordSearchActivity('dish', fullDish);
     } catch (error) {
       if (requestId !== dishDetailQueryIdRef.current) {
         return;
       }
       applySelectedDish(dish, withCustomize);
       setStatus('Loaded basic dish.');
+      void recordSearchActivity('dish', dish);
     } finally {
       if (requestId === dishDetailQueryIdRef.current) {
         setDishLoading(false);
@@ -2245,7 +2433,7 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
   const jumpToDishModeFromQuickSearch = (dish) => {
     setMode('dish');
     setStatus('Dish selected.');
-    selectDish(dish, false);
+    void selectDish(dish, false);
   };
 
   const toVoiceQuery = (spokenText) => {
@@ -2520,6 +2708,127 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
     setCustomSelection(ingredient);
     setCustomSearch(ingredient.name);
     setCustomSuggestions([]);
+    void recordSearchActivity('ingredient', ingredient);
+  };
+
+  const patchIngredientAcrossState = (updated) => {
+    if (!updated?.id) {
+      return;
+    }
+
+    setSelectedIngredient((previous) => (previous?.id === updated.id ? updated : previous));
+    setSelectedInstant((previous) => {
+      if (!previous?.ingredient?.id || previous.ingredient.id !== updated.id) {
+        return previous;
+      }
+      return {
+        ...previous,
+        ingredient: updated
+      };
+    });
+    setIngredientSuggestions((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+    setInstantIngredientSuggestions((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+    setCustomSuggestions((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+    setRecentIngredients((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+  };
+
+  const patchDishAcrossState = (updated) => {
+    if (!updated?.id) {
+      return;
+    }
+
+    setSelectedDish((previous) => (previous?.id === updated.id ? updated : previous));
+    setDishSuggestions((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+    setInstantDishSuggestions((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+    setRecentDishes((previous) => previous.map((item) => (item?.id === updated.id ? { ...item, ...updated } : item)));
+    saveCacheEntry(dishDetailCacheRef.current, updated.id, updated, 120);
+  };
+
+  const openCustomizationEditor = () => {
+    if (!customizationContext?.item?.id) {
+      return;
+    }
+    if (
+      customizationOpen
+      && customizationTarget?.id === customizationContext.item.id
+      && customizationTarget?.type === customizationContext.type
+    ) {
+      setCustomizationOpen(false);
+      setCustomizationStatus('');
+      return;
+    }
+    setCustomizationOpen(true);
+    setCustomizationTarget({
+      type: customizationContext.type,
+      id: customizationContext.item.id
+    });
+    setCustomizationDraft(toCustomizationDraft(customizationContext.item, customizationContext.type));
+    setCustomizationStatus('');
+  };
+
+  const saveCustomization = async () => {
+    if (!customizationTarget?.id) {
+      return;
+    }
+
+    setCustomizationBusy(true);
+    setCustomizationStatus('');
+    try {
+      const payload = toCustomizationPayload(customizationDraft);
+      if (customizationTarget.type === 'dish') {
+        const response = await personalizationAPI.saveDish(customizationTarget.id, payload);
+        const updated = response?.data || null;
+        if (updated) {
+          patchDishAcrossState(updated);
+          setCustomizationDraft(toCustomizationDraft(updated, 'dish'));
+        }
+      } else {
+        const response = await personalizationAPI.saveIngredient(customizationTarget.id, payload);
+        const updated = response?.data || null;
+        if (updated) {
+          patchIngredientAcrossState(updated);
+          setCustomizationDraft(toCustomizationDraft(updated, 'ingredient'));
+        }
+      }
+      setCustomizationStatus('Saved only for your account ★');
+    } catch (error) {
+      setCustomizationStatus(error?.response?.data?.message || 'Unable to save custom nutrition.');
+    } finally {
+      setCustomizationBusy(false);
+    }
+  };
+
+  const revertCustomization = async () => {
+    if (!customizationTarget?.id) {
+      return;
+    }
+
+    setCustomizationBusy(true);
+    setCustomizationStatus('');
+    try {
+      if (customizationTarget.type === 'dish') {
+        await personalizationAPI.revertDish(customizationTarget.id);
+        const refreshed = await dishAPI.get(customizationTarget.id);
+        const updated = refreshed?.data || null;
+        if (updated) {
+          patchDishAcrossState(updated);
+          setCustomizationDraft(toCustomizationDraft(updated, 'dish'));
+        }
+      } else {
+        await personalizationAPI.revertIngredient(customizationTarget.id);
+        const refreshed = await ingredientAPI.get(customizationTarget.id);
+        const updated = refreshed?.data || null;
+        if (updated) {
+          patchIngredientAcrossState(updated);
+          setCustomizationDraft(toCustomizationDraft(updated, 'ingredient'));
+        }
+      }
+      setCustomizationStatus('Reverted to app nutrition values.');
+    } catch (error) {
+      setCustomizationStatus(error?.response?.data?.message || 'Unable to revert customization.');
+    } finally {
+      setCustomizationBusy(false);
+    }
   };
 
   const addCustomIngredient = () => {
@@ -3082,7 +3391,9 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                               <FoodThumb item={item} bucket="dish" className="food-thumb food-thumb-lg" />
                               <div>
                                 <div className="suggestion-top-row">
-                                  <span>{item.name}</span>
+                                  <span>
+                                    {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                                  </span>
                                   <small>{item.cuisine}</small>
                                 </div>
                                 <div className="suggestion-meta-row">
@@ -3131,7 +3442,9 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                               <FoodThumb item={item} bucket="ingredient" />
                               <div>
                                 <div className="suggestion-top-row">
-                                  <span>{item.name}</span>
+                                  <span>
+                                    {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                                  </span>
                                   <small>{Math.round(parseNumber(item.caloriesPer100g))} cal/100g</small>
                                 </div>
                                 <div className="suggestion-meta-row">
@@ -3153,6 +3466,80 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                         )}
                       </section>
                     )}
+                  </div>
+                )}
+                {!instantSuggestionsVisible && (recentLoading || recentIngredients.length > 0 || recentDishes.length > 0) && (
+                  <div className="search-suggestions search-suggestions-layered recent-suggestions">
+                    <section className="suggestion-group">
+                      <h4>Recent Dishes</h4>
+                      {recentDishes.slice(0, 5).map((item) => (
+                        <div key={`recent-dish-${item.id}`} className="dish-suggestion-card dish-suggestion-card-compact">
+                          <div className="dish-suggestion-main">
+                            <FoodThumb item={item} bucket="dish" className="food-thumb food-thumb-lg" />
+                            <div>
+                              <div className="suggestion-top-row">
+                                <span>
+                                  {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                                </span>
+                                <small>{item.cuisine}</small>
+                              </div>
+                              <div className="suggestion-meta-row">
+                                <span className="suggestion-kind-pill dish">Recent</span>
+                                <small>{formatAmount(item.caloriesPerServing)} cal</small>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="dish-suggestion-actions">
+                            <button
+                              type="button"
+                              onMouseDown={(event) => {
+                                event.preventDefault();
+                                jumpToDishModeFromQuickSearch(item);
+                              }}
+                            >
+                              Open Dish
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {!recentLoading && !recentDishes.length && <div className="suggestion-empty suggestion-empty-compact">No recent dishes.</div>}
+                    </section>
+
+                    <section className="suggestion-group">
+                      <h4>Recent Ingredients</h4>
+                      {recentIngredients.slice(0, 6).map((item) => (
+                        <button
+                          type="button"
+                          key={`recent-ingredient-${item.id}`}
+                          className="suggestion-item"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            selectInstantIngredient(item);
+                          }}
+                        >
+                          <div className="suggestion-main-row">
+                            <FoodThumb item={item} bucket="ingredient" />
+                            <div>
+                              <div className="suggestion-top-row">
+                                <span>
+                                  {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                                </span>
+                                <small>{Math.round(parseNumber(item.caloriesPer100g))} cal/100g</small>
+                              </div>
+                              <div className="suggestion-meta-row">
+                                <span className="suggestion-kind-pill ingredient">Recent</span>
+                                <small>
+                                  P {formatAmount(item.proteinPer100g)}g · C {formatAmount(item.carbsPer100g)}g · F {formatAmount(item.fatsPer100g)}g
+                                </small>
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                      {!recentLoading && !recentIngredients.length && (
+                        <div className="suggestion-empty suggestion-empty-compact">No recent ingredients.</div>
+                      )}
+                    </section>
                   </div>
                 )}
               </div>
@@ -3367,7 +3754,10 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                   className="food-thumb food-thumb-inline"
                 />
                 <span>
-                  <strong>{selectedInstant.ingredient?.name}</strong> · {selectedInstant.ingredient?.category || 'Global'}
+                  <strong>
+                    {selectedInstant.ingredient?.name} <PersonalizedBadge active={Boolean(selectedInstant.ingredient?.personalized)} />
+                  </strong>{' '}
+                  · {selectedInstant.ingredient?.category || 'Global'}
                 </span>
               </div>
             )}
@@ -3604,7 +3994,9 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                           <FoodThumb item={item} bucket="ingredient" />
                           <div>
                             <div className="suggestion-top-row">
-                              <span>{item.name}</span>
+                              <span>
+                                {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                              </span>
                               <small>{Math.round(parseNumber(item.caloriesPer100g))} cal/100g</small>
                             </div>
                             <div className="suggestion-meta-row">
@@ -3628,6 +4020,35 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                       <div className="suggestion-empty">No matches.</div>
                     )}
                     {ingredientLoading && <div className="suggestion-empty">Searching...</div>}
+                  </div>
+                )}
+                {!ingredientSuggestionsVisible && (recentLoading || recentIngredients.length > 0) && (
+                  <div className="search-suggestions recent-suggestions-inline">
+                    {recentIngredients.slice(0, 6).map((item) => (
+                      <button
+                        type="button"
+                        key={`recent-mode-ingredient-${item.id}`}
+                        className="suggestion-item"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          selectIngredient(item);
+                        }}
+                      >
+                        <div className="suggestion-main-row">
+                          <FoodThumb item={item} bucket="ingredient" />
+                          <div>
+                            <div className="suggestion-top-row">
+                              <span>
+                                {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                              </span>
+                              <small>{Math.round(parseNumber(item.caloriesPer100g))} cal/100g</small>
+                            </div>
+                            <small className="suggestion-muted">Recent selection</small>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                    {!recentLoading && !recentIngredients.length && <div className="suggestion-empty">No recent ingredients.</div>}
                   </div>
                 )}
               </div>
@@ -3670,7 +4091,10 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
               <div className="selected-line with-thumb">
                 <FoodThumb item={selectedIngredient} bucket="ingredient" className="food-thumb food-thumb-inline" />
                 <span>
-                  <strong>{selectedIngredient.name}</strong> · {selectedIngredient.category}
+                  <strong>
+                    {selectedIngredient.name} <PersonalizedBadge active={Boolean(selectedIngredient.personalized)} />
+                  </strong>{' '}
+                  · {selectedIngredient.category}
                 </span>
               </div>
             )}
@@ -3794,7 +4218,9 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                           <FoodThumb item={item} bucket="dish" className="food-thumb food-thumb-lg" />
                           <div>
                             <div className="suggestion-top-row">
-                              <span>{item.name}</span>
+                              <span>
+                                {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                              </span>
                               <small>{item.cuisine}</small>
                             </div>
                             <div className="suggestion-meta-row">
@@ -3836,6 +4262,38 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                       <div className="suggestion-empty">No matches.</div>
                     )}
                     {dishLoading && <div className="suggestion-empty">Searching...</div>}
+                  </div>
+                )}
+                {!dishSuggestionsVisible && (recentLoading || recentDishes.length > 0) && (
+                  <div className="search-suggestions recent-suggestions-inline">
+                    {recentDishes.slice(0, 6).map((item) => (
+                      <div key={`recent-mode-dish-${item.id}`} className="dish-suggestion-card">
+                        <div className="dish-suggestion-main">
+                          <FoodThumb item={item} bucket="dish" className="food-thumb food-thumb-lg" />
+                          <div>
+                            <div className="suggestion-top-row">
+                              <span>
+                                {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                              </span>
+                              <small>{item.cuisine}</small>
+                            </div>
+                            <small className="suggestion-muted">Recent selection</small>
+                          </div>
+                        </div>
+                        <div className="dish-suggestion-actions">
+                          <button
+                            type="button"
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              selectDish(item, false);
+                            }}
+                          >
+                            Select
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {!recentLoading && !recentDishes.length && <div className="suggestion-empty">No recent dishes.</div>}
                   </div>
                 )}
               </div>
@@ -3903,7 +4361,10 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
               <div className="selected-line with-thumb">
                 <FoodThumb item={selectedDish} bucket="dish" className="food-thumb food-thumb-inline" />
                 <span>
-                  <strong>{selectedDish.name}</strong> · {selectedDish.cuisine}
+                  <strong>
+                    {selectedDish.name} <PersonalizedBadge active={Boolean(selectedDish.personalized)} />
+                  </strong>{' '}
+                  · {selectedDish.cuisine}
                 </span>
               </div>
             )}
@@ -3982,7 +4443,9 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
                               <FoodThumb item={item} bucket="ingredient" />
                               <div>
                                 <div className="suggestion-top-row">
-                                  <span>{item.name}</span>
+                                  <span>
+                                    {item.name} <PersonalizedBadge active={Boolean(item.personalized)} />
+                                  </span>
                                   <small>{Math.round(parseNumber(item.caloriesPer100g))} cal/100g</small>
                                 </div>
                                 <div className="suggestion-meta-row">
@@ -4055,6 +4518,100 @@ function AddEntry({ userId, onEntryAdded, preferences }) {
               />
             </label>
           </>
+        )}
+
+        {customizationContext?.item?.id && (
+          <div className={`account-customization-card ${customizationOpen ? 'is-open' : ''}`}>
+            <div className="account-customization-head">
+              <strong>
+                Personal Nutrition <PersonalizedBadge active={Boolean(customizationContext.item.personalized)} />
+              </strong>
+              <button type="button" className="secondary-btn" onClick={openCustomizationEditor}>
+                {customizationOpen ? 'Hide' : 'Customize For Me'}
+              </button>
+            </div>
+            <small>
+              Saved only for your account. {customizationContext.type === 'dish' ? 'Values are per serving.' : 'Values are per 100g.'}
+            </small>
+
+            {customizationOpen && (
+              <div className="account-customization-body">
+                <div className="account-customization-grid">
+                  <label>
+                    Calories
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={customizationDraft.calories}
+                      onChange={(event) => setCustomizationDraft((previous) => ({ ...previous, calories: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Protein
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={customizationDraft.protein}
+                      onChange={(event) => setCustomizationDraft((previous) => ({ ...previous, protein: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Carbs
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={customizationDraft.carbs}
+                      onChange={(event) => setCustomizationDraft((previous) => ({ ...previous, carbs: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Fats
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={customizationDraft.fats}
+                      onChange={(event) => setCustomizationDraft((previous) => ({ ...previous, fats: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Fibre
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={customizationDraft.fiber}
+                      onChange={(event) => setCustomizationDraft((previous) => ({ ...previous, fiber: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Price (INR)
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={customizationDraft.priceInr}
+                      onChange={(event) => setCustomizationDraft((previous) => ({ ...previous, priceInr: event.target.value }))}
+                    />
+                  </label>
+                </div>
+                <div className="account-customization-actions">
+                  <button type="button" className="primary-btn" disabled={customizationBusy} onClick={saveCustomization}>
+                    {customizationBusy ? 'Saving...' : 'Save For My Account'}
+                  </button>
+                  {customizationContext.item.personalized && (
+                    <button type="button" className="secondary-btn" disabled={customizationBusy} onClick={revertCustomization}>
+                      Revert To App Values
+                    </button>
+                  )}
+                </div>
+                {customizationStatus && <div className="status-line">{customizationStatus}</div>}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="preview-box preview-box-pop">
