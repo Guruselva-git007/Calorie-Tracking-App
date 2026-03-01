@@ -8,8 +8,10 @@ public class DeficiencyToolsRequest {
     private String region;
     private String dietaryPreference;
     private Boolean includeSupplements = true;
+    private Integer dailyCalorieGoal;
     private List<String> deficiencies = new ArrayList<>();
     private List<String> medicalConditions = new ArrayList<>();
+    private List<String> likedFoods = new ArrayList<>();
     private List<String> currencies = new ArrayList<>();
 
     public String getRegion() {
@@ -44,6 +46,14 @@ public class DeficiencyToolsRequest {
         this.deficiencies = deficiencies;
     }
 
+    public Integer getDailyCalorieGoal() {
+        return dailyCalorieGoal;
+    }
+
+    public void setDailyCalorieGoal(Integer dailyCalorieGoal) {
+        this.dailyCalorieGoal = dailyCalorieGoal;
+    }
+
     public List<String> getCurrencies() {
         return currencies;
     }
@@ -58,5 +68,13 @@ public class DeficiencyToolsRequest {
 
     public void setMedicalConditions(List<String> medicalConditions) {
         this.medicalConditions = medicalConditions;
+    }
+
+    public List<String> getLikedFoods() {
+        return likedFoods;
+    }
+
+    public void setLikedFoods(List<String> likedFoods) {
+        this.likedFoods = likedFoods;
     }
 }

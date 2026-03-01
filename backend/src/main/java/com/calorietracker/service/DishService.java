@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -28,6 +29,7 @@ import com.calorietracker.entity.Dish;
 import com.calorietracker.entity.DishComponent;
 import com.calorietracker.entity.Ingredient;
 import com.calorietracker.entity.IngredientCategory;
+import com.calorietracker.entity.SearchLearningDomain;
 import com.calorietracker.repository.DishComponentRepository;
 import com.calorietracker.repository.DishRepository;
 
@@ -38,25 +40,33 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 @Service
 public class DishService {
 
-    private static final long SEARCH_CACHE_TTL_MS = 90_000;
-    private static final int SEARCH_CACHE_MAX = 180;
+    private static final long SEARCH_CACHE_TTL_MS = 300_000;
+    private static final int SEARCH_CACHE_MAX = 320;
+    private static final int SEARCH_TERM_LIMIT = 5;
+    private static final int SEARCH_CONTEXT_LIMIT = 6;
+    private static final int MIN_CANDIDATE_POOL = 14;
+    private static final int MAX_CANDIDATE_POOL = 160;
+    private static final int MIN_CONTAINS_TERM_LENGTH = 3;
 
     private final DishRepository dishRepository;
     private final DishComponentRepository dishComponentRepository;
     private final IngredientService ingredientService;
     private final FoodMetadataService foodMetadataService;
+    private final SearchLearningService searchLearningService;
     private final ConcurrentMap<String, TimedSearchCacheEntry<List<DishResponse>>> searchCache = new ConcurrentHashMap<>();
 
     public DishService(
         DishRepository dishRepository,
         DishComponentRepository dishComponentRepository,
         IngredientService ingredientService,
-        FoodMetadataService foodMetadataService
+        FoodMetadataService foodMetadataService,
+        SearchLearningService searchLearningService
     ) {
         this.dishRepository = dishRepository;
         this.dishComponentRepository = dishComponentRepository;
         this.ingredientService = ingredientService;
         this.foodMetadataService = foodMetadataService;
+        this.searchLearningService = searchLearningService;
     }
 
     @Transactional(readOnly = true)
@@ -67,9 +77,13 @@ public class DishService {
     @Transactional(readOnly = true)
     public List<DishResponse> findDishes(String search, String cuisine, Integer limit) {
         boolean hasSearch = StringUtils.hasText(search);
-        int maxResults = resolveLimit(limit, hasSearch ? 80 : 200);
+        int maxResults = resolveLimit(limit, hasSearch ? 40 : 120);
         boolean cacheable = hasSearch && !StringUtils.hasText(cuisine);
         String cacheKey = cacheable ? buildSearchCacheKey(search, maxResults) : null;
+        Set<String> expandedTerms = hasSearch ? new LinkedHashSet<>(foodMetadataService.expandSearchTerms(search, SEARCH_TERM_LIMIT)) : Set.of();
+        if (hasSearch) {
+            expandedTerms.addAll(searchLearningService.expandLearnedTerms(search, SearchLearningDomain.DISH, SEARCH_TERM_LIMIT));
+        }
 
         if (cacheable) {
             List<DishResponse> cached = getCachedSearch(cacheKey);
@@ -82,33 +96,46 @@ public class DishService {
 
         if (hasSearch) {
             Map<Long, Dish> merged = new LinkedHashMap<>();
-            Set<String> terms = foodMetadataService.expandSearchTerms(search);
-            for (String term : terms) {
+            int candidateTarget = resolveCandidatePoolSize(maxResults);
+            int prefixFetchSize = resolveFetchSize(candidateTarget, Math.max(14, maxResults * 2));
+            int containsFetchSize = resolveFetchSize(candidateTarget, Math.max(18, maxResults * 3));
+            PageRequest prefixPage = PageRequest.of(0, prefixFetchSize);
+            PageRequest containsPage = PageRequest.of(0, containsFetchSize);
+
+            for (String term : expandedTerms) {
                 if (!StringUtils.hasText(term)) {
                     continue;
                 }
 
-                dishRepository.findTop80ByNameStartingWithIgnoreCaseOrderByNameAsc(term)
+                dishRepository.findByNameStartingWithIgnoreCaseOrderByNameAsc(term, prefixPage)
                     .forEach(dish -> merged.put(dish.getId(), dish));
 
-                if (merged.size() >= maxResults * 2) {
+                if (merged.size() >= candidateTarget) {
                     break;
                 }
 
+                if (!shouldRunContainsLookup(term, merged.size(), maxResults)) {
+                    continue;
+                }
+
                 dishRepository
-                    .findTop200ByNameContainingIgnoreCaseOrDescriptionContainingIgnoreCaseOrderByNameAsc(term, term)
+                    .findByNameContainingIgnoreCaseOrDescriptionContainingIgnoreCaseOrderByNameAsc(term, term, containsPage)
                     .forEach(dish -> merged.put(dish.getId(), dish));
 
-                if (merged.size() >= maxResults * 2) {
+                if (merged.size() >= candidateTarget) {
                     break;
                 }
             }
 
+            if (merged.size() < Math.min(6, Math.max(2, maxResults / 2))) {
+                addFuzzyDishCandidates(merged, search, candidateTarget);
+            }
+
             dishes = merged.isEmpty()
                 ? List.of()
-                : new ArrayList<>(merged.values().stream().limit(maxResults).toList());
+                : new ArrayList<>(merged.values().stream().limit(candidateTarget).toList());
         } else {
-            dishes = dishRepository.findTop200ByOrderByNameAsc().stream().limit(maxResults).collect(Collectors.toList());
+            dishes = dishRepository.findByOrderByNameAsc(PageRequest.of(0, Math.max(1, maxResults)));
         }
 
         if (StringUtils.hasText(cuisine)) {
@@ -119,7 +146,7 @@ public class DishService {
         }
 
         if (hasSearch) {
-            List<SearchQueryContext> searchContexts = buildSearchContexts(search);
+            List<SearchQueryContext> searchContexts = buildSearchContexts(search, expandedTerms);
             String primaryQuery = searchContexts.isEmpty() ? "" : searchContexts.get(0).query();
             List<String> primaryTokens = searchContexts.isEmpty() ? List.of() : searchContexts.get(0).tokens();
             int minimumScore = minimumDishSearchScore(primaryQuery, primaryTokens);
@@ -136,10 +163,19 @@ public class DishService {
                 .collect(Collectors.toList());
         }
 
-        List<DishResponse> response = dishes.stream()
-            .limit(maxResults)
-            .map(this::toResponse)
-            .collect(Collectors.toList());
+        if (hasSearch && dishes.isEmpty()) {
+            dishes = fuzzyDishFallback(search, maxResults);
+        }
+
+        List<DishResponse> response = toBulkResponses(dishes, maxResults);
+
+        if (hasSearch) {
+            searchLearningService.recordOutcome(
+                search,
+                SearchLearningDomain.DISH,
+                response.stream().map(DishResponse::getName).limit(8).collect(Collectors.toList())
+            );
+        }
 
         if (cacheable) {
             cacheSearch(cacheKey, response);
@@ -155,35 +191,54 @@ public class DishService {
         }
 
         int maxResults = Math.min(limit == null || limit <= 0 ? 12 : limit, 40);
+        String cacheKey = "suggest|" + buildSearchCacheKey(search, maxResults);
+        List<DishResponse> cached = getCachedSearch(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+        int candidateTarget = resolveCandidatePoolSize(maxResults);
+        int prefixFetchSize = resolveFetchSize(candidateTarget, Math.max(12, maxResults * 2));
+        int containsFetchSize = resolveFetchSize(candidateTarget, Math.max(15, maxResults * 3));
+        PageRequest prefixPage = PageRequest.of(0, prefixFetchSize);
+        PageRequest containsPage = PageRequest.of(0, containsFetchSize);
         Map<Long, Dish> merged = new LinkedHashMap<>();
-        Set<String> terms = foodMetadataService.expandSearchTerms(search);
+        Set<String> terms = new LinkedHashSet<>(foodMetadataService.expandSearchTerms(search, SEARCH_TERM_LIMIT));
+        terms.addAll(searchLearningService.expandLearnedTerms(search, SearchLearningDomain.DISH, SEARCH_TERM_LIMIT));
 
         for (String term : terms) {
             if (!StringUtils.hasText(term)) {
                 continue;
             }
 
-            dishRepository.findTop80ByNameStartingWithIgnoreCaseOrderByNameAsc(term)
+            dishRepository.findByNameStartingWithIgnoreCaseOrderByNameAsc(term, prefixPage)
                 .forEach(dish -> merged.put(dish.getId(), dish));
 
             if (merged.size() >= maxResults) {
                 break;
             }
 
-            dishRepository.findTop120ByNameContainingIgnoreCaseOrderByNameAsc(term)
+            if (!shouldRunContainsLookup(term, merged.size(), maxResults)) {
+                continue;
+            }
+
+            dishRepository.findByNameContainingIgnoreCaseOrderByNameAsc(term, containsPage)
                 .forEach(dish -> merged.put(dish.getId(), dish));
 
-            if (merged.size() >= maxResults * 2) {
+            if (merged.size() >= candidateTarget) {
                 break;
             }
         }
 
-        List<SearchQueryContext> searchContexts = buildSearchContexts(search);
+        if (merged.size() < Math.min(6, Math.max(2, maxResults / 2))) {
+            addFuzzyDishCandidates(merged, search, candidateTarget);
+        }
+
+        List<SearchQueryContext> searchContexts = buildSearchContexts(search, terms);
         String primaryQuery = searchContexts.isEmpty() ? "" : searchContexts.get(0).query();
         List<String> primaryTokens = searchContexts.isEmpty() ? List.of() : searchContexts.get(0).tokens();
         int minimumScore = minimumDishSearchScore(primaryQuery, primaryTokens);
 
-        return merged.values().stream()
+        List<DishResponse> ranked = merged.values().stream()
             .map(dish -> new ScoredDish(dish, dishRelevanceScore(dish, searchContexts)))
             .filter(scored -> scored.score() >= minimumScore)
             .sorted(
@@ -196,6 +251,230 @@ public class DishService {
             .map(ScoredDish::dish)
             .map(this::toSuggestionResponse)
             .collect(Collectors.toList());
+
+        if (!ranked.isEmpty()) {
+            searchLearningService.recordOutcome(
+                search,
+                SearchLearningDomain.DISH,
+                ranked.stream().map(DishResponse::getName).limit(8).collect(Collectors.toList())
+            );
+            cacheSearch(cacheKey, ranked);
+            return ranked;
+        }
+
+        List<DishResponse> fallback = fuzzyDishFallback(search, maxResults).stream()
+            .map(this::toSuggestionResponse)
+            .collect(Collectors.toList());
+        searchLearningService.recordOutcome(
+            search,
+            SearchLearningDomain.DISH,
+            fallback.stream().map(DishResponse::getName).limit(8).collect(Collectors.toList())
+        );
+        cacheSearch(cacheKey, fallback);
+        return fallback;
+    }
+
+    private boolean shouldRunContainsLookup(String term, int mergedSize, int maxResults) {
+        if (!StringUtils.hasText(term)) {
+            return false;
+        }
+        if (term.trim().length() >= MIN_CONTAINS_TERM_LENGTH) {
+            return true;
+        }
+        return mergedSize < Math.max(8, maxResults / 2);
+    }
+
+    private void addFuzzyDishCandidates(Map<Long, Dish> merged, String search, int candidateTarget) {
+        String normalizedSearch = foodMetadataService.normalizeToken(search);
+        if (!StringUtils.hasText(normalizedSearch) || normalizedSearch.length() < 4) {
+            return;
+        }
+
+        int fallbackPoolSize = Math.min(900, Math.max(candidateTarget * 4, 280));
+        List<Dish> fallbackPool = dishRepository.findByOrderByNameAsc(PageRequest.of(0, fallbackPoolSize));
+        List<ScoredDish> fuzzyCandidates = fallbackPool.stream()
+            .filter(dish -> hasFuzzyAnchor(foodMetadataService.normalizeToken(dish.getName()), normalizedSearch))
+            .map(dish -> new ScoredDish(dish, fuzzyDishScore(dish, normalizedSearch)))
+            .filter(scored -> scored.score() >= 58)
+            .sorted(
+                Comparator
+                    .comparingInt(ScoredDish::score)
+                    .reversed()
+                    .thenComparing(scored -> scored.dish().getName(), String.CASE_INSENSITIVE_ORDER)
+            )
+            .limit(Math.max(candidateTarget, 30))
+            .collect(Collectors.toList());
+
+        for (ScoredDish candidate : fuzzyCandidates) {
+            merged.putIfAbsent(candidate.dish().getId(), candidate.dish());
+            if (merged.size() >= candidateTarget) {
+                break;
+            }
+        }
+    }
+
+    private int fuzzyDishScore(Dish dish, String normalizedSearch) {
+        String name = foodMetadataService.normalizeToken(dish.getName());
+        String description = foodMetadataService.normalizeToken(dish.getDescription());
+
+        if (!StringUtils.hasText(name)) {
+            return 0;
+        }
+
+        int score = similarityScore(name, normalizedSearch);
+        int bestTokenSimilarity = tokenizeSearch(name).stream()
+            .mapToInt(token -> similarityScore(token, normalizedSearch))
+            .max()
+            .orElse(0);
+        score = Math.max(score, bestTokenSimilarity);
+
+        if (name.contains(normalizedSearch)) {
+            score += 24;
+        } else if (description.contains(normalizedSearch)) {
+            score += 14;
+        }
+        if (bestTokenSimilarity >= 80) {
+            score += 22;
+        } else if (bestTokenSimilarity >= 70) {
+            score += 14;
+        }
+
+        for (String token : tokenizeSearch(normalizedSearch)) {
+            if (name.contains(token)) {
+                score += 7;
+            } else if (description.contains(token)) {
+                score += 4;
+            }
+        }
+        return score;
+    }
+
+    private List<Dish> fuzzyDishFallback(String search, int maxResults) {
+        String normalizedSearch = foodMetadataService.normalizeToken(search);
+        if (!StringUtils.hasText(normalizedSearch) || normalizedSearch.length() < 4) {
+            return List.of();
+        }
+
+        int fallbackPoolSize = Math.min(1200, Math.max(maxResults * 8, 400));
+        return dishRepository.findByOrderByNameAsc(PageRequest.of(0, fallbackPoolSize)).stream()
+            .filter(dish -> hasFuzzyAnchor(foodMetadataService.normalizeToken(dish.getName()), normalizedSearch))
+            .map(dish -> new ScoredDish(dish, fuzzyDishScore(dish, normalizedSearch)))
+            .filter(scored -> scored.score() >= 58)
+            .sorted(
+                Comparator
+                    .comparingInt(ScoredDish::score)
+                    .reversed()
+                    .thenComparing(scored -> scored.dish().getName(), String.CASE_INSENSITIVE_ORDER)
+            )
+            .limit(Math.max(1, maxResults))
+            .map(ScoredDish::dish)
+            .collect(Collectors.toList());
+    }
+
+    private boolean hasFuzzyAnchor(String candidateName, String query) {
+        if (!StringUtils.hasText(candidateName) || !StringUtils.hasText(query)) {
+            return false;
+        }
+
+        String normalizedQuery = query.replace(" ", "");
+        if (!StringUtils.hasText(normalizedQuery)) {
+            return false;
+        }
+
+        String compactName = candidateName.replace(" ", "");
+        if (compactName.contains(normalizedQuery) || normalizedQuery.contains(compactName)) {
+            return true;
+        }
+
+        for (String token : tokenizeSearch(candidateName)) {
+            if (token.length() < 3) {
+                continue;
+            }
+            if (token.contains(normalizedQuery) || normalizedQuery.contains(token)) {
+                return true;
+            }
+            if (token.charAt(0) != normalizedQuery.charAt(0)) {
+                continue;
+            }
+            if (token.length() >= 2
+                && normalizedQuery.length() >= 2
+                && token.substring(0, 2).equals(normalizedQuery.substring(0, 2))) {
+                return true;
+            }
+            if (sharedBigramCount(token, normalizedQuery) >= 2) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private int sharedBigramCount(String left, String right) {
+        if (!StringUtils.hasText(left) || !StringUtils.hasText(right)) {
+            return 0;
+        }
+        if (left.length() < 2 || right.length() < 2) {
+            return 0;
+        }
+
+        Set<String> leftBigrams = new LinkedHashSet<>();
+        for (int i = 0; i < left.length() - 1; i++) {
+            leftBigrams.add(left.substring(i, i + 2));
+        }
+
+        int shared = 0;
+        for (int i = 0; i < right.length() - 1; i++) {
+            if (leftBigrams.contains(right.substring(i, i + 2))) {
+                shared++;
+            }
+        }
+        return shared;
+    }
+
+    private int similarityScore(String left, String right) {
+        if (!StringUtils.hasText(left) || !StringUtils.hasText(right)) {
+            return 0;
+        }
+        if (left.equals(right)) {
+            return 100;
+        }
+
+        int maxLen = Math.max(left.length(), right.length());
+        if (maxLen == 0) {
+            return 0;
+        }
+
+        int distance = levenshteinDistance(left, right);
+        double similarity = 1.0 - (distance / (double) maxLen);
+        return (int) Math.round(Math.max(0.0, similarity) * 100.0);
+    }
+
+    private int levenshteinDistance(String left, String right) {
+        int leftLen = left.length();
+        int rightLen = right.length();
+        int[] previous = new int[rightLen + 1];
+        int[] current = new int[rightLen + 1];
+
+        for (int j = 0; j <= rightLen; j++) {
+            previous[j] = j;
+        }
+
+        for (int i = 1; i <= leftLen; i++) {
+            current[0] = i;
+            for (int j = 1; j <= rightLen; j++) {
+                int cost = left.charAt(i - 1) == right.charAt(j - 1) ? 0 : 1;
+                current[j] = Math.min(
+                    Math.min(current[j - 1] + 1, previous[j] + 1),
+                    previous[j - 1] + cost
+                );
+            }
+
+            int[] swap = previous;
+            previous = current;
+            current = swap;
+        }
+
+        return previous[rightLen];
     }
 
     @Transactional(readOnly = true)
@@ -260,17 +539,42 @@ public class DishService {
     }
 
     public DishResponse toResponse(Dish dish) {
+        return toResponse(dish, getDishComponents(dish));
+    }
+
+    private List<DishResponse> toBulkResponses(List<Dish> dishes, int maxResults) {
+        if (dishes == null || dishes.isEmpty() || maxResults <= 0) {
+            return List.of();
+        }
+
+        List<Dish> limitedDishes = dishes.stream().limit(maxResults).collect(Collectors.toList());
+        Map<Long, List<DishComponent>> componentsByDishId = buildComponentsByDishId(limitedDishes);
+
+        return limitedDishes.stream()
+            .map(dish -> toResponse(dish, componentsByDishId.getOrDefault(dish.getId(), List.of())))
+            .collect(Collectors.toList());
+    }
+
+    private Map<Long, List<DishComponent>> buildComponentsByDishId(List<Dish> dishes) {
+        if (dishes == null || dishes.isEmpty()) {
+            return Map.of();
+        }
+
+        return dishComponentRepository.findByDishInWithIngredientOrderByDishIdAscIdAsc(dishes).stream()
+            .collect(Collectors.groupingBy(component -> component.getDish().getId(), LinkedHashMap::new, Collectors.toList()));
+    }
+
+    private DishResponse toResponse(Dish dish, List<DishComponent> components) {
         DishResponse response = new DishResponse();
         response.setId(dish.getId());
         response.setName(dish.getName());
         response.setCuisine(dish.getCuisine());
-        response.setDescription(dish.getDescription());
+        response.setDescription(compactDescription(dish.getDescription(), 420));
         response.setFactChecked(dish.getFactChecked());
         response.setSource(dish.getSource());
         response.setImageUrl(foodMetadataService.resolveDishImageUrl(dish.getImageUrl(), dish.getName(), dish.getCuisine()));
 
-        List<DishComponent> components = getDishComponents(dish);
-        List<DishComponentResponse> componentResponses = components.stream()
+        List<DishComponentResponse> componentResponses = (components == null ? List.<DishComponent>of() : components).stream()
             .map(this::toComponentResponse)
             .collect(Collectors.toList());
 
@@ -441,16 +745,39 @@ public class DishService {
         return Math.min(limit, 200);
     }
 
+    private int resolveCandidatePoolSize(int maxResults) {
+        int scaled = Math.max(MIN_CANDIDATE_POOL, maxResults * 4);
+        return Math.min(MAX_CANDIDATE_POOL, scaled);
+    }
+
+    private int resolveFetchSize(int candidateTarget, int preferredSize) {
+        return Math.max(1, Math.min(candidateTarget, preferredSize));
+    }
+
     private DishResponse toSuggestionResponse(Dish dish) {
         DishResponse response = new DishResponse();
         response.setId(dish.getId());
         response.setName(dish.getName());
         response.setCuisine(dish.getCuisine());
-        response.setDescription(dish.getDescription());
+        response.setDescription(compactDescription(dish.getDescription(), 180));
         response.setFactChecked(dish.getFactChecked());
         response.setSource(dish.getSource());
         response.setImageUrl(foodMetadataService.resolveDishImageUrl(dish.getImageUrl(), dish.getName(), dish.getCuisine()));
         return response;
+    }
+
+    private String compactDescription(String value, int maxLength) {
+        if (!StringUtils.hasText(value)) {
+            return value;
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        if (normalized.length() <= maxLength) {
+            return normalized;
+        }
+        if (maxLength <= 3) {
+            return normalized.substring(0, maxLength);
+        }
+        return normalized.substring(0, maxLength - 3) + "...";
     }
 
     private List<String> tokenizeSearch(String normalizedSearch) {
@@ -466,16 +793,24 @@ public class DishService {
     }
 
     private List<SearchQueryContext> buildSearchContexts(String search) {
+        return buildSearchContexts(search, foodMetadataService.expandSearchTerms(search, SEARCH_CONTEXT_LIMIT));
+    }
+
+    private List<SearchQueryContext> buildSearchContexts(String search, Set<String> expandedTerms) {
         String normalizedOriginal = foodMetadataService.normalizeToken(search);
         if (!StringUtils.hasText(normalizedOriginal)) {
             return List.of();
+        }
+
+        if (expandedTerms == null || expandedTerms.isEmpty()) {
+            return List.of(new SearchQueryContext(normalizedOriginal, tokenizeSearch(normalizedOriginal)));
         }
 
         boolean originalIsPhrase = normalizedOriginal.contains(" ");
         String compactOriginal = normalizedOriginal.replace(" ", "");
         Set<String> filtered = new LinkedHashSet<>();
 
-        for (String term : foodMetadataService.expandSearchTerms(search)) {
+        for (String term : expandedTerms) {
             String candidate = foodMetadataService.normalizeToken(term);
             if (!StringUtils.hasText(candidate)) {
                 continue;
@@ -491,7 +826,7 @@ public class DishService {
             }
 
             filtered.add(candidate);
-            if (filtered.size() >= 12) {
+            if (filtered.size() >= SEARCH_CONTEXT_LIMIT) {
                 break;
             }
         }
@@ -562,7 +897,20 @@ public class DishService {
         }
 
         if (!searchTokens.isEmpty()) {
-            score += Math.round((matchedTokens * 120.0f) / searchTokens.size());
+            double coverage = matchedTokens / (double) searchTokens.size();
+            score += Math.round(coverage * 140.0);
+
+            if (searchTokens.size() >= 2) {
+                if (coverage >= 0.999) {
+                    score += 170;
+                } else if (coverage >= 0.67) {
+                    score -= 20;
+                } else if (coverage >= 0.5) {
+                    score -= 120;
+                } else {
+                    score -= 220;
+                }
+            }
         }
 
         if (StringUtils.hasText(normalizedSearch) && name.length() > normalizedSearch.length()) {

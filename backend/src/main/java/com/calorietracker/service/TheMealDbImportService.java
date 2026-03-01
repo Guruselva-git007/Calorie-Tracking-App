@@ -123,6 +123,94 @@ public class TheMealDbImportService {
         return result;
     }
 
+    public Map<String, Integer> importDessertCategory(int maxDesserts) {
+        int cap = Math.max(1, maxDesserts);
+        int imported = 0;
+        int skippedExisting = 0;
+        int skippedMissingComponents = 0;
+
+        JsonNode meals = fetchMealsByCategory("Dessert");
+        if (meals == null || !meals.isArray()) {
+            return Map.of(
+                "TOTAL_IMPORTED", 0,
+                "SKIPPED_EXISTING", 0,
+                "SKIPPED_MISSING_COMPONENTS", 0,
+                "PROCESSED", 0
+            );
+        }
+
+        int processed = 0;
+        for (JsonNode mealRef : meals) {
+            if (processed >= cap) {
+                break;
+            }
+
+            String mealId = mealRef.path("idMeal").asText("").trim();
+            if (!StringUtils.hasText(mealId)) {
+                continue;
+            }
+            processed++;
+
+            String quickMealName = mealRef.path("strMeal").asText("").trim();
+            if (StringUtils.hasText(quickMealName) && dishRepository.existsByNameIgnoreCase(quickMealName)) {
+                skippedExisting++;
+                continue;
+            }
+
+            JsonNode meal = fetchMealById(mealId);
+            if (meal == null || meal.isMissingNode()) {
+                continue;
+            }
+
+            String mealName = meal.path("strMeal").asText("").trim();
+            if (!StringUtils.hasText(mealName) || dishRepository.existsByNameIgnoreCase(mealName)) {
+                skippedExisting++;
+                continue;
+            }
+
+            String area = meal.path("strArea").asText("").trim();
+            String cuisine = StringUtils.hasText(area) ? area + " Dessert" : "Global Dessert";
+            List<ComponentPlan> components = extractComponents(meal, cuisine);
+            if (components.isEmpty()) {
+                skippedMissingComponents++;
+                continue;
+            }
+
+            String description = meal.path("strInstructions").asText("Imported from TheMealDB Dessert category").trim();
+            if (description.length() > 500) {
+                description = description.substring(0, 500);
+            }
+
+            Dish dish = new Dish(
+                mealName,
+                cuisine,
+                description,
+                true,
+                "THE_MEAL_DB_DESSERT"
+            );
+            dish.setImageUrl(
+                foodMetadataService.resolveDishImageUrl(
+                    meal.path("strMealThumb").asText(""),
+                    mealName,
+                    cuisine
+                )
+            );
+            Dish savedDish = dishRepository.save(dish);
+
+            for (ComponentPlan component : components) {
+                dishComponentRepository.save(new DishComponent(savedDish, component.ingredient(), component.grams()));
+            }
+            imported++;
+        }
+
+        Map<String, Integer> result = new LinkedHashMap<>();
+        result.put("TOTAL_IMPORTED", imported);
+        result.put("SKIPPED_EXISTING", skippedExisting);
+        result.put("SKIPPED_MISSING_COMPONENTS", skippedMissingComponents);
+        result.put("PROCESSED", processed);
+        return result;
+    }
+
     private int importArea(String area, String targetCuisine, int limit) {
         if (limit <= 0) {
             return 0;
@@ -200,6 +288,17 @@ public class TheMealDbImportService {
         try {
             String encoded = URLEncoder.encode(area, StandardCharsets.UTF_8);
             String url = "https://www.themealdb.com/api/json/v1/1/filter.php?a=" + encoded;
+            JsonNode root = fetchJson(url);
+            return root.path("meals");
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private JsonNode fetchMealsByCategory(String category) {
+        try {
+            String encoded = URLEncoder.encode(category, StandardCharsets.UTF_8);
+            String url = "https://www.themealdb.com/api/json/v1/1/filter.php?c=" + encoded;
             JsonNode root = fetchJson(url);
             return root.path("meals");
         } catch (Exception ignored) {
@@ -348,6 +447,31 @@ public class TheMealDbImportService {
         }
         if (containsAny(value, "fish", "salmon", "tuna", "prawn", "shrimp", "crab", "mussel", "oyster", "squid", "octopus")) {
             return IngredientCategory.SEAFOOD;
+        }
+        if (containsAny(
+            value,
+            "dessert",
+            "sweet",
+            "cake",
+            "pastry",
+            "cookie",
+            "biscuit",
+            "chocolate",
+            "brownie",
+            "donut",
+            "doughnut",
+            "halwa",
+            "laddu",
+            "ladoo",
+            "kheer",
+            "payasam",
+            "jalebi",
+            "rasgulla",
+            "gulab",
+            "barfi",
+            "burfi"
+        )) {
+            return IngredientCategory.SNACK;
         }
         if (containsAny(value, "rice")) {
             return IngredientCategory.RICE;

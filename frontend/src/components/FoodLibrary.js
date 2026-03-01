@@ -3,6 +3,8 @@ import { dishAPI, ingredientAPI } from '../services/api';
 import { buildFoodPlaceholderDataUrl, formatAmount, formatInr, getFoodImageSrc, normalizeText, parseNumber } from '../utils/food';
 import './FoodLibrary.css';
 
+const SEARCH_DEBOUNCE_MS = 120;
+
 const saveCacheEntry = (cache, key, value, maxSize = 120) => {
   cache.set(key, value);
   if (cache.size > maxSize) {
@@ -91,11 +93,13 @@ const FoodThumb = ({ item, bucket = 'food', className = 'library-thumb' }) => {
 function FoodLibrary() {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
   const [selected, setSelected] = useState(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const blurTimerRef = useRef(null);
   const requestIdRef = useRef(0);
+  const detailRequestIdRef = useRef(0);
   const searchCacheRef = useRef(new Map());
 
   useEffect(
@@ -109,6 +113,7 @@ function FoodLibrary() {
 
   useEffect(() => {
     const normalized = normalizeText(search);
+    const queryValue = search.trim();
     if (normalized.length < 2) {
       setSuggestions([]);
       setLoading(false);
@@ -129,16 +134,16 @@ function FoodLibrary() {
     const timer = window.setTimeout(async () => {
       try {
         const [ingredientRes, dishRes] = await Promise.all([
-          ingredientAPI.search(search, { limit: 10 }),
-          dishAPI.search(search, { limit: 10 })
+          ingredientAPI.search(queryValue, { limit: 8 }),
+          dishAPI.suggest(queryValue, { limit: 8 })
         ]);
 
         if (requestId !== requestIdRef.current) {
           return;
         }
 
-        const ingredientItems = (ingredientRes?.data || []).slice(0, 10).map((item) => ingredientSuggestion(item, normalized));
-        const dishItems = (dishRes?.data || []).slice(0, 10).map((item) => dishSuggestion(item, normalized));
+        const ingredientItems = (ingredientRes?.data || []).slice(0, 8).map((item) => ingredientSuggestion(item, normalized));
+        const dishItems = (dishRes?.data || []).slice(0, 8).map((item) => dishSuggestion(item, normalized));
 
         const merged = [...ingredientItems, ...dishItems]
           .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
@@ -155,7 +160,7 @@ function FoodLibrary() {
           setLoading(false);
         }
       }
-    }, 120);
+    }, SEARCH_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timer);
@@ -190,10 +195,54 @@ function FoodLibrary() {
     setSearchFocused(true);
   };
 
-  const selectSuggestion = (item) => {
+  const selectSuggestion = async (item) => {
+    const requestId = detailRequestIdRef.current + 1;
+    detailRequestIdRef.current = requestId;
+
     setSelected(item);
     setSearch(item.name);
     setSearchFocused(false);
+
+    if (item.type !== 'dish') {
+      setDetailLoading(false);
+      return;
+    }
+
+    try {
+      setDetailLoading(true);
+      const response = await dishAPI.get(item.id);
+      if (requestId !== detailRequestIdRef.current) {
+        return;
+      }
+
+      const fullDish = response?.data;
+      if (!fullDish) {
+        return;
+      }
+
+      setSelected((previous) => {
+        if (!previous || previous.type !== 'dish' || previous.id !== item.id) {
+          return previous;
+        }
+        return {
+          ...previous,
+          subtitle: `${fullDish.cuisine} · ${fullDish.description || 'Custom dish'}`,
+          calories: parseNumber(fullDish.caloriesPerServing),
+          protein: parseNumber(fullDish.proteinPerServing),
+          carbs: parseNumber(fullDish.carbsPerServing),
+          fats: parseNumber(fullDish.fatsPerServing),
+          fiber: parseNumber(fullDish.fiberPerServing),
+          price: parseNumber(fullDish.estimatedPriceUsdPerServing),
+          imageUrl: fullDish.imageUrl || previous.imageUrl
+        };
+      });
+    } catch (error) {
+      // Keep lightweight suggestion data if detail fetch fails.
+    } finally {
+      if (requestId === detailRequestIdRef.current) {
+        setDetailLoading(false);
+      }
+    }
   };
 
   return (
@@ -296,6 +345,7 @@ function FoodLibrary() {
             </div>
           </div>
 
+          {detailLoading && selected.type === 'dish' ? <div className="library-note">Loading dish nutrition...</div> : null}
           {selected.note ? <div className="library-note">{selected.note}</div> : null}
         </div>
       ) : (

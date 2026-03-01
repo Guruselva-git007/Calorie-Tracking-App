@@ -1,19 +1,44 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { dishAPI, entryAPI, ingredientAPI } from '../services/api';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { dishAPI, entryAPI, ingredientAPI, toolsAPI } from '../services/api';
 import {
   buildFoodPlaceholderDataUrl,
   UNIT_OPTIONS,
-  WEIGHT_PRESETS,
+  formatUnitPresetLabel,
   formatAmount,
   formatInr,
   getFoodImageSrc,
+  getQuantityInputStep,
+  getUnitPresets,
   getUnitStepForTenGrams,
+  getUnitStepLabel,
   lineNutritionFromIngredient,
   normalizeText,
   parseNumber,
   toGrams
 } from '../utils/food';
 import './AddEntry.css';
+
+const QUICK_SEARCH_DEBOUNCE_MS = 120;
+const BARCODE_SCAN_INTERVAL_MS = 340;
+const BARCODE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'];
+const SCAN_FILE_HINT_STOPWORDS = new Set([
+  'img',
+  'image',
+  'photo',
+  'screenshot',
+  'camera',
+  'scan',
+  'dcim',
+  'pxl',
+  'mvimg',
+  'whatsapp',
+  'telegram',
+  'jpg',
+  'jpeg',
+  'png',
+  'webp',
+  'heic'
+]);
 
 const saveCacheEntry = (cache, key, value, maxSize = 80) => {
   cache.set(key, value);
@@ -22,6 +47,13 @@ const saveCacheEntry = (cache, key, value, maxSize = 80) => {
     cache.delete(firstKey);
   }
 };
+
+const hasDishMacroSnapshot = (dish) =>
+  parseNumber(dish?.caloriesPerServing) > 0
+  || parseNumber(dish?.proteinPerServing) > 0
+  || parseNumber(dish?.carbsPerServing) > 0
+  || parseNumber(dish?.fatsPerServing) > 0
+  || parseNumber(dish?.fiberPerServing) > 0;
 
 const createIngredientFromDishComponent = (component) => {
   const grams = parseNumber(component.grams, 100);
@@ -533,10 +565,55 @@ const parseCsv = (value) =>
 
 const formatServingLabel = (quantity, unit) => {
   const value = parseNumber(quantity, 0);
+  const safeUnit = String(unit || '').trim();
   if (Math.abs(value - Math.round(value)) < 0.0001) {
-    return `${Math.round(value)}${unit}`;
+    return `${Math.round(value)} ${safeUnit}`.trim();
   }
-  return `${value.toFixed(2)}${unit}`;
+  return `${value.toFixed(2)} ${safeUnit}`.trim();
+};
+
+const extractBarcodeFromFilename = (filename) => {
+  const text = String(filename || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  const exact = text.match(/(?:^|[^0-9])([0-9]{8,14})(?:[^0-9]|$)/);
+  if (exact?.[1]) {
+    return exact[1];
+  }
+  return '';
+};
+
+const buildSearchHintsFromFilename = (filename) => {
+  const text = String(filename || '')
+    .replace(/\.[a-z0-9]{2,5}$/i, ' ')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  if (!text) {
+    return [];
+  }
+
+  const tokens = text
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !SCAN_FILE_HINT_STOPWORDS.has(token) && !/^\d+$/.test(token));
+
+  if (!tokens.length) {
+    return [];
+  }
+
+  const phrases = new Set();
+  phrases.add(tokens.slice(0, 3).join(' ').trim());
+  phrases.add(tokens.slice(0, 2).join(' ').trim());
+  phrases.add(tokens.join(' ').trim());
+  tokens.slice(0, 4).forEach((token) => phrases.add(token));
+
+  return Array.from(phrases).filter((value) => value.length >= 3).slice(0, 6);
 };
 
 const toBasePriceUnit = (unit) => {
@@ -552,6 +629,81 @@ const sanitizeCategory = (value) => {
     .trim()
     .toUpperCase();
   return INSTANT_CATEGORY_OPTIONS.includes(candidate) ? candidate : 'OTHER';
+};
+
+const mapScanCategoryToPresetCategory = (value) => {
+  const category = sanitizeCategory(value);
+  if (category !== 'OTHER') {
+    return category;
+  }
+
+  const text = normalizeText(value);
+  if (!text) {
+    return 'OTHER';
+  }
+  if (text.includes('juice') || text.includes('beverage') || text.includes('drink') || text.includes('coffee') || text.includes('tea')) {
+    return 'BEVERAGE';
+  }
+  if (text.includes('seafood') || text.includes('fish')) {
+    return 'SEAFOOD';
+  }
+  if (text.includes('meat') || text.includes('chicken') || text.includes('beef') || text.includes('mutton') || text.includes('pork')) {
+    return 'MEAT';
+  }
+  if (text.includes('dairy') || text.includes('cheese') || text.includes('milk') || text.includes('curd') || text.includes('yogurt') || text.includes('ice cream')) {
+    return 'DAIRY';
+  }
+  if (text.includes('rice')) {
+    return 'RICE';
+  }
+  if (text.includes('oil') || text.includes('ghee') || text.includes('butter')) {
+    return 'OIL';
+  }
+  if (text.includes('snack') || text.includes('chips') || text.includes('cake') || text.includes('biscuit')) {
+    return 'SNACK';
+  }
+  return 'OTHER';
+};
+
+const extractServingQuantityFromScan = (scan) => {
+  const quantity = parseNumber(scan?.servingQuantity, 0);
+  if (quantity > 0) {
+    return quantity;
+  }
+  const note = String(scan?.servingNote || '').trim();
+  const match = note.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (!match) {
+    return 0;
+  }
+  const parsed = parseNumber(match[1], 0);
+  return parsed > 0 ? parsed : 0;
+};
+
+const buildIngredientPayloadFromScan = (scan) => {
+  const safeName = String(scan?.name || '').trim();
+  const safeCategory = mapScanCategoryToPresetCategory(scan?.category);
+  const barcode = String(scan?.barcode || '').trim();
+  const servingNote = String(scan?.servingNote || '').trim() || '100 g';
+  const aliases = [safeName, barcode].filter(Boolean);
+
+  return {
+    name: safeName,
+    category: safeCategory,
+    cuisine: 'Global',
+    caloriesPer100g: Math.max(0.1, parseNumber(scan?.caloriesPer100g, 0)),
+    servingNote,
+    proteinPer100g: Math.max(0, parseNumber(scan?.proteinPer100g)),
+    carbsPer100g: Math.max(0, parseNumber(scan?.carbsPer100g)),
+    fatsPer100g: Math.max(0, parseNumber(scan?.fatsPer100g)),
+    fiberPer100g: Math.max(0, parseNumber(scan?.fiberPer100g)),
+    averagePriceUsd: 5,
+    averagePriceUnit: 'kg',
+    aliases,
+    regionalAvailability: ['Global'],
+    factConfirmed: Boolean(scan?.factChecked),
+    source: 'SCAN_OPEN_FOOD_FACTS',
+    imageUrl: scan?.imageUrl || ''
+  };
 };
 
 const normalizeInstantPreset = (preset, index = 0) => {
@@ -607,6 +759,7 @@ const createIngredientFromPreset = (preset) => {
     fiberPer100g: normalized.fallback.fiberPer100g,
     averagePriceUsd: normalized.fallback.averagePriceUsd,
     averagePriceUnit: normalized.fallback.averagePriceUnit,
+    servingNote: normalized.hint,
     aliases: normalized.aliases,
     regionalAvailability: ['Global']
   };
@@ -838,8 +991,9 @@ const buildIngredientPayloadFromPreset = (preset) => {
   };
 };
 
-function AddEntry({ userId, onEntryAdded }) {
+function AddEntry({ userId, onEntryAdded, preferences }) {
   const [mode, setMode] = useState('instant');
+  const [instantAdvancedOpen, setInstantAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
 
@@ -853,6 +1007,18 @@ function AddEntry({ userId, onEntryAdded }) {
   const [selectedInstant, setSelectedInstant] = useState(null);
   const [instantQuantity, setInstantQuantity] = useState(200);
   const [instantUnit, setInstantUnit] = useState('ml');
+  const [scanPanelOpen, setScanPanelOpen] = useState(false);
+  const [scanStatus, setScanStatus] = useState('');
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanCodeInput, setScanCodeInput] = useState('');
+  const [scanLiveActive, setScanLiveActive] = useState(false);
+  const [scanResult, setScanResult] = useState(null);
+  const [scanEngineLabel, setScanEngineLabel] = useState('Barcode');
+  const [scanAiBusy, setScanAiBusy] = useState(false);
+  const [scanAiCandidates, setScanAiCandidates] = useState([]);
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState('');
 
   const [customInstantPresets, setCustomInstantPresets] = useState(() => readCustomInstantPresets());
   const [showPresetBuilder, setShowPresetBuilder] = useState(false);
@@ -887,10 +1053,22 @@ function AddEntry({ userId, onEntryAdded }) {
 
   const [dishCalculation, setDishCalculation] = useState(null);
 
+  const deferredInstantQuery = useDeferredValue(instantQuery);
+  const deferredIngredientQuery = useDeferredValue(ingredientQuery);
+  const deferredDishQuery = useDeferredValue(dishQuery);
+  const deferredCustomSearch = useDeferredValue(customSearch);
+
   const instantTimerRef = useRef(null);
   const instantQueryIdRef = useRef(0);
   const instantIngredientCacheRef = useRef(new Map());
   const instantDishCacheRef = useRef(new Map());
+  const scanVideoRef = useRef(null);
+  const scanFileInputRef = useRef(null);
+  const scanGalleryInputRef = useRef(null);
+  const scanStreamRef = useRef(null);
+  const scanIntervalRef = useRef(null);
+  const scanLookupLockRef = useRef(false);
+  const voiceRecognitionRef = useRef(null);
 
   const ingredientTimerRef = useRef(null);
   const ingredientQueryIdRef = useRef(0);
@@ -898,10 +1076,24 @@ function AddEntry({ userId, onEntryAdded }) {
   const dishTimerRef = useRef(null);
   const dishQueryIdRef = useRef(0);
   const dishDetailQueryIdRef = useRef(0);
+  const dishDetailCacheRef = useRef(new Map());
   const dishSearchCacheRef = useRef(new Map());
   const customTimerRef = useRef(null);
   const customQueryIdRef = useRef(0);
   const customSearchCacheRef = useRef(new Map());
+
+  const canUseCameraApi =
+    typeof window !== 'undefined'
+    && typeof navigator !== 'undefined'
+    && Boolean(navigator?.mediaDevices?.getUserMedia);
+  const canUseBarcodeDetector =
+    typeof window !== 'undefined'
+    && typeof window.BarcodeDetector !== 'undefined';
+  const canUseLiveBarcodeScan = canUseCameraApi && canUseBarcodeDetector;
+  const voiceRecognitionMode = preferences?.voiceRecognitionMode === 'manual' ? 'manual' : 'auto';
+  const SpeechRecognitionCtor =
+    typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition || null) : null;
+  const canUseVoiceRecognition = Boolean(SpeechRecognitionCtor);
 
   const allInstantPresets = useMemo(
     () => [...customInstantPresets, ...BUILT_IN_INSTANT_PRESETS].map((preset, index) => normalizeInstantPreset(preset, index)).filter(Boolean),
@@ -926,16 +1118,41 @@ function AddEntry({ userId, onEntryAdded }) {
       if (customTimerRef.current) {
         window.clearTimeout(customTimerRef.current);
       }
+      if (scanIntervalRef.current) {
+        window.clearInterval(scanIntervalRef.current);
+        scanIntervalRef.current = null;
+      }
+      if (scanStreamRef.current) {
+        scanStreamRef.current.getTracks().forEach((track) => track.stop());
+        scanStreamRef.current = null;
+      }
+      if (voiceRecognitionRef.current) {
+        try {
+          voiceRecognitionRef.current.onresult = null;
+          voiceRecognitionRef.current.onerror = null;
+          voiceRecognitionRef.current.onend = null;
+          voiceRecognitionRef.current.stop();
+        } catch (error) {
+          // no-op cleanup
+        }
+        voiceRecognitionRef.current = null;
+      }
     },
     []
   );
+
+  useEffect(() => {
+    if (mode !== 'instant') {
+      setInstantAdvancedOpen(false);
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (instantTimerRef.current) {
       window.clearTimeout(instantTimerRef.current);
     }
 
-    const normalized = normalizeText(instantQuery);
+    const normalized = normalizeText(deferredInstantQuery);
     if (normalized.length < 2) {
       setInstantPresetSuggestions([]);
       setInstantIngredientSuggestions([]);
@@ -992,12 +1209,12 @@ function AddEntry({ userId, onEntryAdded }) {
         const ingredientRequest = fetchIngredients
           ? cachedIngredients
             ? Promise.resolve({ data: cachedIngredients })
-            : ingredientAPI.search(instantQuery, { limit: 12 })
+            : ingredientAPI.search(deferredInstantQuery.trim(), { limit: 8 })
           : Promise.resolve({ data: [] });
         const dishRequest = fetchDishes
           ? cachedDishes
             ? Promise.resolve({ data: cachedDishes })
-            : dishAPI.search(instantQuery, { limit: 12 })
+            : dishAPI.suggest(deferredInstantQuery.trim(), { limit: 8 })
           : Promise.resolve({ data: [] });
 
         const [ingredientsResponse, dishesResponse] = await Promise.all([ingredientRequest, dishRequest]);
@@ -1006,8 +1223,8 @@ function AddEntry({ userId, onEntryAdded }) {
           return;
         }
 
-        const ingredients = (ingredientsResponse.data || []).slice(0, 12);
-        const dishes = (dishesResponse.data || []).slice(0, 12);
+        const ingredients = (ingredientsResponse.data || []).slice(0, 8);
+        const dishes = (dishesResponse.data || []).slice(0, 8);
 
         if (fetchIngredients && !cachedIngredients) {
           saveCacheEntry(instantIngredientCacheRef.current, normalized, ingredients);
@@ -1028,15 +1245,15 @@ function AddEntry({ userId, onEntryAdded }) {
           setInstantLoading(false);
         }
       }
-    }, 150);
-  }, [instantQuery, allInstantPresets, instantSearchScope]);
+    }, QUICK_SEARCH_DEBOUNCE_MS);
+  }, [deferredInstantQuery, allInstantPresets, instantSearchScope]);
 
   useEffect(() => {
     if (ingredientTimerRef.current) {
       window.clearTimeout(ingredientTimerRef.current);
     }
 
-    const normalized = normalizeText(ingredientQuery);
+    const normalized = normalizeText(deferredIngredientQuery);
     const isExact = normalizeText(selectedIngredient?.name) === normalized;
 
     if (normalized.length < 2 || isExact) {
@@ -1058,7 +1275,7 @@ function AddEntry({ userId, onEntryAdded }) {
       setIngredientLoading(true);
 
       try {
-        const response = await ingredientAPI.search(ingredientQuery, { limit: 10 });
+        const response = await ingredientAPI.search(deferredIngredientQuery.trim(), { limit: 10 });
         if (requestId !== ingredientQueryIdRef.current) {
           return;
         }
@@ -1074,15 +1291,15 @@ function AddEntry({ userId, onEntryAdded }) {
           setIngredientLoading(false);
         }
       }
-    }, 150);
-  }, [ingredientQuery, selectedIngredient]);
+    }, QUICK_SEARCH_DEBOUNCE_MS);
+  }, [deferredIngredientQuery, selectedIngredient]);
 
   useEffect(() => {
     if (dishTimerRef.current) {
       window.clearTimeout(dishTimerRef.current);
     }
 
-    const normalized = normalizeText(dishQuery);
+    const normalized = normalizeText(deferredDishQuery);
     const isExact = normalizeText(selectedDish?.name) === normalized;
 
     if (normalized.length < 2 || isExact) {
@@ -1104,7 +1321,7 @@ function AddEntry({ userId, onEntryAdded }) {
       setDishLoading(true);
 
       try {
-        const response = await dishAPI.suggest(dishQuery, { limit: 10 });
+        const response = await dishAPI.suggest(deferredDishQuery.trim(), { limit: 10 });
         if (requestId !== dishQueryIdRef.current) {
           return;
         }
@@ -1120,15 +1337,15 @@ function AddEntry({ userId, onEntryAdded }) {
           setDishLoading(false);
         }
       }
-    }, 150);
-  }, [dishQuery, selectedDish]);
+    }, QUICK_SEARCH_DEBOUNCE_MS);
+  }, [deferredDishQuery, selectedDish]);
 
   useEffect(() => {
     if (customTimerRef.current) {
       window.clearTimeout(customTimerRef.current);
     }
 
-    const normalized = normalizeText(customSearch);
+    const normalized = normalizeText(deferredCustomSearch);
     const isExact = normalizeText(customSelection?.name) === normalized;
 
     if (normalized.length < 2 || isExact) {
@@ -1150,7 +1367,7 @@ function AddEntry({ userId, onEntryAdded }) {
       setCustomLoading(true);
 
       try {
-        const response = await ingredientAPI.search(customSearch, { limit: 10 });
+        const response = await ingredientAPI.search(deferredCustomSearch.trim(), { limit: 10 });
         if (requestId !== customQueryIdRef.current) {
           return;
         }
@@ -1166,8 +1383,8 @@ function AddEntry({ userId, onEntryAdded }) {
           setCustomLoading(false);
         }
       }
-    }, 150);
-  }, [customSearch, customSelection]);
+    }, QUICK_SEARCH_DEBOUNCE_MS);
+  }, [deferredCustomSearch, customSelection]);
 
   useEffect(() => {
     if (!selectedDish || !customizeDish) {
@@ -1182,7 +1399,13 @@ function AddEntry({ userId, onEntryAdded }) {
     setCustomRows(rows);
   }, [selectedDish, customizeDish, customRows.length]);
 
-  const normalizedInstantQuery = useMemo(() => normalizeText(instantQuery), [instantQuery]);
+  useEffect(() => {
+    if (mode !== 'instant' || !scanPanelOpen) {
+      stopLiveScan();
+    }
+  }, [mode, scanPanelOpen]);
+
+  const normalizedInstantQuery = useMemo(() => normalizeText(deferredInstantQuery), [deferredInstantQuery]);
 
   const sortedInstantPresetSuggestions = useMemo(
     () =>
@@ -1324,7 +1547,7 @@ function AddEntry({ userId, onEntryAdded }) {
   const displayedPreview = mode === 'dish' ? dishPreview : mode === 'ingredient' ? ingredientPreview : instantPreview;
 
   const instantSuggestionsVisible = useMemo(() => {
-    const normalizedQuery = normalizeText(instantQuery);
+    const normalizedQuery = normalizeText(deferredInstantQuery);
     if (normalizedQuery.length < 2) {
       return false;
     }
@@ -1336,24 +1559,24 @@ function AddEntry({ userId, onEntryAdded }) {
     );
 
     return normalizedQuery !== selectedName;
-  }, [instantQuery, selectedInstant]);
+  }, [deferredInstantQuery, selectedInstant]);
 
   const ingredientSuggestionsVisible =
-    normalizeText(ingredientQuery).length >= 2 &&
-    normalizeText(selectedIngredient?.name) !== normalizeText(ingredientQuery);
+    normalizeText(deferredIngredientQuery).length >= 2 &&
+    normalizeText(selectedIngredient?.name) !== normalizeText(deferredIngredientQuery);
 
   const dishSuggestionsVisible =
-    normalizeText(dishQuery).length >= 2 &&
-    normalizeText(selectedDish?.name) !== normalizeText(dishQuery);
+    normalizeText(deferredDishQuery).length >= 2 &&
+    normalizeText(selectedDish?.name) !== normalizeText(deferredDishQuery);
 
   const customSuggestionsVisible =
-    normalizeText(customSearch).length >= 2 &&
-    normalizeText(customSelection?.name) !== normalizeText(customSearch);
+    normalizeText(deferredCustomSearch).length >= 2 &&
+    normalizeText(customSelection?.name) !== normalizeText(deferredCustomSearch);
 
   const instantSearchStatus = useMemo(() => {
-    const normalized = normalizeText(instantQuery);
+    const normalized = normalizeText(deferredInstantQuery);
     if (normalized.length < 2) {
-      return 'Type 2+ letters';
+      return '';
     }
     if (instantLoading) {
       return 'Searching...';
@@ -1361,60 +1584,61 @@ function AddEntry({ userId, onEntryAdded }) {
 
     const total =
       visibleInstantPresetSuggestions.length + visibleInstantDishSuggestions.length + visibleInstantIngredientSuggestions.length;
-    if (!total) {
+    if (!total && instantSuggestionsVisible) {
       return 'No matches';
     }
 
-    return `${total} matches`;
+    return '';
   }, [
-    instantQuery,
+    deferredInstantQuery,
     instantLoading,
+    instantSuggestionsVisible,
     visibleInstantPresetSuggestions.length,
     visibleInstantDishSuggestions.length,
     visibleInstantIngredientSuggestions.length
   ]);
 
   const ingredientSearchStatus = useMemo(() => {
-    const normalized = normalizeText(ingredientQuery);
+    const normalized = normalizeText(deferredIngredientQuery);
     if (normalized.length < 2) {
-      return 'Type 2+ letters';
+      return '';
     }
     if (ingredientLoading) {
       return 'Searching...';
     }
-    if (!ingredientSuggestions.length) {
+    if (!ingredientSuggestions.length && ingredientSuggestionsVisible) {
       return 'No matches';
     }
-    return `${ingredientSuggestions.length} matches`;
-  }, [ingredientQuery, ingredientLoading, ingredientSuggestions.length]);
+    return '';
+  }, [deferredIngredientQuery, ingredientLoading, ingredientSuggestions.length, ingredientSuggestionsVisible]);
 
   const dishSearchStatus = useMemo(() => {
-    const normalized = normalizeText(dishQuery);
+    const normalized = normalizeText(deferredDishQuery);
     if (normalized.length < 2) {
-      return 'Type 2+ letters';
+      return '';
     }
     if (dishLoading) {
       return 'Searching...';
     }
-    if (!dishSuggestions.length) {
+    if (!dishSuggestions.length && dishSuggestionsVisible) {
       return 'No matches';
     }
-    return `${dishSuggestions.length} matches`;
-  }, [dishQuery, dishLoading, dishSuggestions.length]);
+    return '';
+  }, [deferredDishQuery, dishLoading, dishSuggestions.length, dishSuggestionsVisible]);
 
   const customSearchStatus = useMemo(() => {
-    const normalized = normalizeText(customSearch);
+    const normalized = normalizeText(deferredCustomSearch);
     if (normalized.length < 2) {
-      return 'Type 2+ letters';
+      return '';
     }
     if (customLoading) {
       return 'Searching...';
     }
-    if (!customSuggestions.length) {
+    if (!customSuggestions.length && customSuggestionsVisible) {
       return 'No matches';
     }
-    return `${customSuggestions.length} matches`;
-  }, [customSearch, customLoading, customSuggestions.length]);
+    return '';
+  }, [deferredCustomSearch, customLoading, customSuggestions.length, customSuggestionsVisible]);
 
   const shiftMainQuantity = (direction) => {
     const step = getUnitStepForTenGrams(unit);
@@ -1533,12 +1757,448 @@ function AddEntry({ userId, onEntryAdded }) {
     setInstantPresetSuggestions([]);
     setInstantIngredientSuggestions([]);
     setInstantDishSuggestions([]);
+    setStatus('Scanned food ready to log.');
+  };
+
+  const stopLiveScan = () => {
+    if (scanIntervalRef.current) {
+      window.clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+    if (scanStreamRef.current) {
+      scanStreamRef.current.getTracks().forEach((track) => track.stop());
+      scanStreamRef.current = null;
+    }
+    if (scanVideoRef.current) {
+      scanVideoRef.current.srcObject = null;
+    }
+    scanLookupLockRef.current = false;
+    setScanLiveActive(false);
+    setScanEngineLabel('Barcode');
+  };
+
+  const resolveScannedIngredient = async (scanPayload) => {
+    if (!scanPayload?.name) {
+      return null;
+    }
+
+    const existing = await findExistingIngredientByName(scanPayload.name);
+    if (existing?.id) {
+      return existing;
+    }
+
+    const payload = buildIngredientPayloadFromScan(scanPayload);
+    try {
+      const created = await ingredientAPI.createCustom(payload);
+      if (created?.data?.id) {
+        return created.data;
+      }
+    } catch (error) {
+      if (error?.response?.status === 409) {
+        const conflictMatch = await findExistingIngredientByName(payload.name);
+        if (conflictMatch?.id) {
+          return conflictMatch;
+        }
+      }
+      throw error;
+    }
+
+    return null;
+  };
+
+  const applyScannedInstant = async (scanPayload) => {
+    const parsedServingQuantity = extractServingQuantityFromScan(scanPayload);
+    const servingUnit = UNIT_OPTIONS.includes(scanPayload?.servingUnit) ? scanPayload.servingUnit : 'g';
+    const fallbackIngredient = {
+      id: null,
+      name: scanPayload?.name || 'Scanned Food',
+      imageUrl: scanPayload?.imageUrl || '',
+      category: mapScanCategoryToPresetCategory(scanPayload?.category),
+      cuisine: 'Global',
+      caloriesPer100g: Math.max(0.1, parseNumber(scanPayload?.caloriesPer100g, 1)),
+      proteinPer100g: Math.max(0, parseNumber(scanPayload?.proteinPer100g, 0)),
+      carbsPer100g: Math.max(0, parseNumber(scanPayload?.carbsPer100g, 0)),
+      fatsPer100g: Math.max(0, parseNumber(scanPayload?.fatsPer100g, 0)),
+      fiberPer100g: Math.max(0, parseNumber(scanPayload?.fiberPer100g, 0)),
+      averagePriceUsd: 5,
+      averagePriceUnit: 'kg',
+      aliases: [scanPayload?.barcode].filter(Boolean),
+      servingNote: scanPayload?.servingNote || '100 g'
+    };
+
+    let ingredient = fallbackIngredient;
+    try {
+      const synced = await resolveScannedIngredient(scanPayload);
+      if (synced?.id) {
+        ingredient = {
+          ...fallbackIngredient,
+          ...synced,
+          imageUrl: synced.imageUrl || fallbackIngredient.imageUrl
+        };
+      }
+    } catch (error) {
+      // Keep fallback ingredient data so users can still log immediately.
+    }
+
+    setSelectedInstant({
+      kind: 'scanned',
+      scan: scanPayload,
+      ingredient
+    });
+    setInstantQuery(scanPayload?.name || 'Scanned Food');
+    setInstantQuantity(parsedServingQuantity > 0 ? parsedServingQuantity : 100);
+    setInstantUnit(servingUnit);
+    setInstantPresetSuggestions([]);
+    setInstantIngredientSuggestions([]);
+    setInstantDishSuggestions([]);
+  };
+
+  const lookupBarcode = async (code, fromScanner = false) => {
+    const cleanCode = String(code || '').trim();
+    if (!cleanCode) {
+      setScanStatus('Enter a barcode to continue.');
+      return;
+    }
+
+    if (!fromScanner) {
+      setScanEngineLabel('Manual Barcode');
+    } else if (!scanLiveActive) {
+      setScanEngineLabel('Photo Barcode');
+    }
+
+    setScanBusy(true);
+    setScanAiCandidates([]);
+    setScanStatus(fromScanner ? `Code ${cleanCode} detected. Verifying nutrition...` : 'Verifying barcode...');
+
+    try {
+      const response = await toolsAPI.lookupBarcode(cleanCode);
+      const payload = response?.data || {};
+      if (!payload?.found) {
+        setScanResult(null);
+        setScanStatus(payload?.message || 'No barcode match found.');
+        return;
+      }
+
+      setScanResult(payload);
+      setScanStatus(payload?.message || 'Scanned and verified.');
+      await applyScannedInstant(payload);
+    } catch (error) {
+      setScanResult(null);
+      setScanStatus(error?.response?.data?.message || 'Unable to verify barcode right now.');
+    } finally {
+      setScanBusy(false);
+    }
+  };
+
+  const startLiveScan = async () => {
+    if (!canUseLiveBarcodeScan) {
+      setScanStatus('Live barcode scan is unavailable on this browser. Use Capture Photo, Upload Gallery, or manual barcode input.');
+      return;
+    }
+
+    try {
+      stopLiveScan();
+      setScanStatus('Opening camera...');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' }
+        },
+        audio: false
+      });
+
+      scanStreamRef.current = stream;
+
+      if (scanVideoRef.current) {
+        scanVideoRef.current.srcObject = stream;
+        await scanVideoRef.current.play();
+      }
+
+      const detector = new window.BarcodeDetector({ formats: BARCODE_FORMATS });
+      setScanLiveActive(true);
+      setScanEngineLabel('Live Camera');
+      setScanStatus('Point the camera at a food barcode.');
+
+      scanIntervalRef.current = window.setInterval(async () => {
+        if (scanLookupLockRef.current || !scanVideoRef.current) {
+          return;
+        }
+        if (scanVideoRef.current.readyState < 2) {
+          return;
+        }
+
+        try {
+          const codes = await detector.detect(scanVideoRef.current);
+          if (!codes?.length) {
+            return;
+          }
+          const value = String(codes[0]?.rawValue || '').trim();
+          if (!value) {
+            return;
+          }
+
+          scanLookupLockRef.current = true;
+          setScanCodeInput(value);
+          await lookupBarcode(value, true);
+          stopLiveScan();
+        } catch (error) {
+          // Keep polling until a barcode is detected or user stops camera.
+        } finally {
+          scanLookupLockRef.current = false;
+        }
+      }, BARCODE_SCAN_INTERVAL_MS);
+    } catch (error) {
+      stopLiveScan();
+      setScanStatus('Camera access denied or unavailable. Use manual barcode input.');
+    }
+  };
+
+  const onManualBarcodeLookup = async () => {
+    await lookupBarcode(scanCodeInput, false);
+  };
+
+  const toIngredientFromAiCandidate = (candidate) => ({
+    id: candidate?.id || null,
+    name: candidate?.name || 'Recognized Food',
+    imageUrl: candidate?.imageUrl || '',
+    category: candidate?.category || 'OTHER',
+    cuisine: candidate?.cuisine || 'Global',
+    caloriesPer100g: Math.max(0.1, parseNumber(candidate?.calories, 1)),
+    proteinPer100g: Math.max(0, parseNumber(candidate?.protein, 0)),
+    carbsPer100g: Math.max(0, parseNumber(candidate?.carbs, 0)),
+    fatsPer100g: Math.max(0, parseNumber(candidate?.fats, 0)),
+    fiberPer100g: Math.max(0, parseNumber(candidate?.fiber, 0)),
+    averagePriceUsd: 5,
+    averagePriceUnit: 'kg',
+    aliases: [],
+    servingNote: '100 g'
+  });
+
+  const applyAiCandidate = async (candidate) => {
+    if (!candidate?.type) {
+      return;
+    }
+
+    if (candidate.type === 'ingredient') {
+      const ingredient = toIngredientFromAiCandidate(candidate);
+      setScanEngineLabel('AI Hybrid');
+      setScanStatus(`AI recognized ${ingredient.name}. Review amount and add.`);
+      setScanResult({
+        found: true,
+        name: ingredient.name,
+        brand: 'AI',
+        factChecked: true,
+        imageUrl: ingredient.imageUrl
+      });
+      selectInstantIngredient(ingredient);
+      return;
+    }
+
+    if (candidate.type === 'dish' && candidate.id) {
+      setScanEngineLabel('AI Hybrid');
+      setMode('dish');
+      setScanStatus(`AI recognized dish: ${candidate.name}. Opened in Dishes.`);
+      const dishLite = {
+        id: candidate.id,
+        name: candidate.name,
+        cuisine: candidate.cuisine || 'Global',
+        description: candidate.description || 'AI recognized dish',
+        imageUrl: candidate.imageUrl || ''
+      };
+      await selectDish(dishLite, false);
+      return;
+    }
+  };
+
+  const recognizeFoodImage = async (file) => {
+    if (!file) {
+      return false;
+    }
+
+    const formData = new FormData();
+    formData.append('image', file);
+    const hintTokens = buildSearchHintsFromFilename(file.name);
+    const hint = hintTokens.length ? hintTokens[0] : '';
+
+    setScanAiBusy(true);
+    setScanEngineLabel('AI Hybrid');
+    setScanStatus('Analyzing image with AI...');
+
+    try {
+      const response = await toolsAPI.recognizeImage(formData, { hint, limit: 8 });
+      const payload = response?.data || {};
+      const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+      setScanAiCandidates(candidates.slice(0, 5));
+
+      if (!payload?.found || !candidates.length) {
+        setScanStatus(payload?.message || 'AI could not find a confident match.');
+        return false;
+      }
+
+      await applyAiCandidate(candidates[0]);
+      if (payload?.engine) {
+        setScanEngineLabel(payload.engine);
+      }
+      return true;
+    } catch (error) {
+      setScanStatus(error?.response?.data?.message || 'AI image recognition is unavailable right now.');
+      return false;
+    } finally {
+      setScanAiBusy(false);
+    }
+  };
+
+  const tryPhotoNameSmartMatch = async (fileName) => {
+    const searchHints = buildSearchHintsFromFilename(fileName);
+    if (!searchHints.length) {
+      return false;
+    }
+
+    for (const hint of searchHints) {
+      try {
+        const [ingredientResponse, dishResponse] = await Promise.all([
+          ingredientAPI.search(hint, { limit: 6 }),
+          dishAPI.suggest(hint, { limit: 4 })
+        ]);
+
+        const ingredientItems = Array.isArray(ingredientResponse?.data) ? ingredientResponse.data : [];
+        const dishItems = Array.isArray(dishResponse?.data) ? dishResponse.data : [];
+        const ingredientMatch = findIngredientMatchForName(ingredientItems, hint);
+        const dishMatch = dishItems[0] || null;
+
+        const ingredientScore = ingredientMatch
+          ? smartTextMatchScore(
+            `${ingredientMatch?.name || ''} ${(ingredientMatch?.aliases || []).join(' ')} ${ingredientMatch?.category || ''}`,
+            hint
+          )
+          : 0;
+        const dishScore = dishMatch
+          ? smartTextMatchScore(
+            `${dishMatch?.name || ''} ${dishMatch?.description || ''} ${dishMatch?.cuisine || ''}`,
+            hint
+          )
+          : 0;
+
+        if (ingredientScore <= 0 && dishScore <= 0) {
+          continue;
+        }
+
+        if (ingredientMatch && ingredientScore >= dishScore) {
+          setScanEngineLabel('Photo Match');
+          selectInstantIngredient(ingredientMatch);
+          setScanStatus(`Smart photo match: ${ingredientMatch.name}. Verify and add.`);
+          return true;
+        }
+
+        if (dishMatch) {
+          setScanEngineLabel('Photo Match');
+          setMode('dish');
+          setDishQuery(dishMatch.name);
+          setSelectedDish(null);
+          setDishSuggestions(dishItems);
+          setScanStatus(`Smart photo match: ${dishMatch.name}. Review in Dishes and add.`);
+          return true;
+        }
+      } catch (error) {
+        // Continue trying other hints.
+      }
+    }
+
+    return false;
+  };
+
+  const scanFromFile = async (file) => {
+    if (!file) {
+      return;
+    }
+
+    const barcodeFromFileName = extractBarcodeFromFilename(file.name);
+    setScanAiCandidates([]);
+    try {
+      let detectedCode = '';
+      if (canUseBarcodeDetector) {
+        setScanEngineLabel('Photo Barcode');
+        setScanStatus('Analyzing photo for barcode...');
+        const bitmap = await window.createImageBitmap(file);
+        const detector = new window.BarcodeDetector({ formats: BARCODE_FORMATS });
+        const codes = await detector.detect(bitmap);
+        detectedCode = String(codes?.[0]?.rawValue || '').trim();
+      }
+
+      const resolvedCode = detectedCode || barcodeFromFileName;
+      if (resolvedCode) {
+        setScanCodeInput(resolvedCode);
+        await lookupBarcode(resolvedCode, true);
+        return;
+      }
+
+      const aiMatched = await recognizeFoodImage(file);
+      if (aiMatched) {
+        return;
+      }
+
+      const matchedByName = await tryPhotoNameSmartMatch(file.name);
+      if (matchedByName) {
+        return;
+      }
+
+      if (!canUseBarcodeDetector) {
+        setScanStatus('Photo barcode detection is unavailable on this browser. Type barcode or food name manually.');
+      } else {
+        setScanStatus('No barcode found in photo. Try clearer barcode or search by food name.');
+      }
+    } catch (error) {
+      const aiMatched = await recognizeFoodImage(file);
+      if (aiMatched) {
+        return;
+      }
+      const matchedByName = await tryPhotoNameSmartMatch(file.name);
+      if (matchedByName) {
+        return;
+      }
+      if (barcodeFromFileName) {
+        setScanCodeInput(barcodeFromFileName);
+        await lookupBarcode(barcodeFromFileName, false);
+        return;
+      }
+      setScanStatus('Unable to scan from image. Try manual barcode entry or food search.');
+    }
+  };
+
+  const onScanCaptureFile = async (event) => {
+    const file = event.target.files?.[0];
+    await scanFromFile(file);
+    if (event.target) {
+      event.target.value = '';
+    }
+  };
+
+  const onScanGalleryFile = async (event) => {
+    const file = event.target.files?.[0];
+    await scanFromFile(file);
+    if (event.target) {
+      event.target.value = '';
+    }
   };
 
   const selectIngredient = (ingredient) => {
     setSelectedIngredient(ingredient);
     setIngredientQuery(ingredient.name);
     setIngredientSuggestions([]);
+  };
+
+  const applySelectedDish = (dishData, withCustomize) => {
+    const nextDish = dishData || null;
+    setSelectedDish(nextDish);
+    setDishQuery(nextDish?.name || '');
+    setDishCalculation(null);
+
+    if (withCustomize) {
+      setCustomizeDish(true);
+      setCustomRows((nextDish?.components || []).map(toCustomRowFromComponent));
+    } else {
+      setCustomizeDish(false);
+      setCustomRows([]);
+    }
   };
 
   const selectDish = async (dish, withCustomize = false) => {
@@ -1549,6 +2209,15 @@ function AddEntry({ userId, onEntryAdded }) {
     setDishAmount(250);
     setDishUnit('g');
 
+    const cachedDish = dishDetailCacheRef.current.get(dish.id);
+    if (cachedDish) {
+      if (requestId === dishDetailQueryIdRef.current) {
+        applySelectedDish(cachedDish, withCustomize);
+        setDishLoading(false);
+      }
+      return;
+    }
+
     try {
       const response = await dishAPI.get(dish.id);
       if (requestId !== dishDetailQueryIdRef.current) {
@@ -1556,31 +2225,15 @@ function AddEntry({ userId, onEntryAdded }) {
       }
 
       const fullDish = response?.data || dish;
-      setSelectedDish(fullDish);
-      setDishQuery(fullDish.name);
-      setDishCalculation(null);
-
-      if (withCustomize) {
-        setCustomizeDish(true);
-        setCustomRows((fullDish.components || []).map(toCustomRowFromComponent));
-      } else {
-        setCustomizeDish(false);
-        setCustomRows([]);
+      if (fullDish?.id != null) {
+        saveCacheEntry(dishDetailCacheRef.current, fullDish.id, fullDish, 120);
       }
+      applySelectedDish(fullDish, withCustomize);
     } catch (error) {
       if (requestId !== dishDetailQueryIdRef.current) {
         return;
       }
-      setSelectedDish(dish);
-      setDishQuery(dish.name);
-      setDishCalculation(null);
-      if (withCustomize) {
-        setCustomizeDish(true);
-        setCustomRows([]);
-      } else {
-        setCustomizeDish(false);
-        setCustomRows([]);
-      }
+      applySelectedDish(dish, withCustomize);
       setStatus('Loaded basic dish.');
     } finally {
       if (requestId === dishDetailQueryIdRef.current) {
@@ -1593,6 +2246,274 @@ function AddEntry({ userId, onEntryAdded }) {
     setMode('dish');
     setStatus('Dish selected.');
     selectDish(dish, false);
+  };
+
+  const toVoiceQuery = (spokenText) => {
+    const cleaned = String(spokenText || '')
+      .replace(/^(please\s+)?(add|log|track|calculate|search|find)\s+/i, '')
+      .replace(/\s+(please|now)$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned;
+  };
+
+  const buildVoiceFallbackPayload = (spokenQuery, ingredients, dishes) => {
+    const normalized = normalizeText(spokenQuery);
+    const bestIngredient = ingredients?.[0] || null;
+    const bestDish = dishes?.[0] || null;
+    const ingredientScore = bestIngredient
+      ? smartTextMatchScore(
+        `${bestIngredient?.name || ''} ${(bestIngredient?.aliases || []).join(' ')} ${bestIngredient?.cuisine || ''}`,
+        normalized
+      )
+      : 0;
+    const dishScore = bestDish
+      ? smartTextMatchScore(
+        `${bestDish?.name || ''} ${bestDish?.cuisine || ''} ${bestDish?.description || ''}`,
+        normalized
+      )
+      : 0;
+    const bestType = ingredientScore >= dishScore ? 'ingredient' : 'dish';
+
+    return {
+      found: Boolean(bestIngredient || bestDish),
+      query: spokenQuery,
+      bestType,
+      bestIngredient,
+      bestDish,
+      ingredients,
+      dishes
+    };
+  };
+
+  const resolveVoiceMatches = async (spokenQuery) => {
+    try {
+      const response = await toolsAPI.resolveVoiceFood(spokenQuery, 8);
+      return response?.data || {};
+    } catch (error) {
+      const [ingredientResponse, dishResponse] = await Promise.allSettled([
+        ingredientAPI.search(spokenQuery, { limit: 8 }),
+        dishAPI.suggest(spokenQuery, { limit: 8 })
+      ]);
+
+      const ingredients = ingredientResponse.status === 'fulfilled' ? ingredientResponse.value?.data || [] : [];
+      const dishes = dishResponse.status === 'fulfilled' ? dishResponse.value?.data || [] : [];
+      return buildVoiceFallbackPayload(spokenQuery, ingredients, dishes);
+    }
+  };
+
+  const applyVoiceManualFlow = (spokenQuery, payload) => {
+    const ingredients = (payload?.ingredients || []).slice(0, 8);
+    const dishes = (payload?.dishes || []).slice(0, 8);
+
+    if (mode === 'ingredient') {
+      setIngredientQuery(spokenQuery);
+      setSelectedIngredient(null);
+      setIngredientSuggestions(ingredients.slice(0, 10));
+      setStatus(ingredients.length ? 'Voice captured. Select ingredient to continue.' : 'Voice captured. No close ingredient yet.');
+      return;
+    }
+
+    if (mode === 'dish') {
+      setDishQuery(spokenQuery);
+      setSelectedDish(null);
+      setDishSuggestions(dishes.slice(0, 10));
+      setStatus(dishes.length ? 'Voice captured. Select dish to continue.' : 'Voice captured. No close dish yet.');
+      return;
+    }
+
+    const normalizedQuery = normalizeText(spokenQuery);
+    const presetMatches = allInstantPresets
+      .map((preset) => ({
+        preset,
+        score: presetSearchScore(preset, normalizedQuery)
+      }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .map((item) => item.preset)
+      .slice(0, 8);
+
+    setInstantQuery(spokenQuery);
+    setSelectedInstant(null);
+    setInstantPresetSuggestions(presetMatches);
+    setInstantIngredientSuggestions(ingredients);
+    setInstantDishSuggestions(dishes);
+    setStatus(
+      presetMatches.length || ingredients.length || dishes.length
+        ? 'Voice captured. Choose suggestion to continue.'
+        : 'Voice captured. No close match yet.'
+    );
+  };
+
+  const applyVoiceAutoFlow = async (spokenQuery, payload) => {
+    const bestIngredient = payload?.bestIngredient || payload?.ingredients?.[0] || null;
+    const bestDish = payload?.bestDish || payload?.dishes?.[0] || null;
+    const bestType = payload?.bestType || '';
+
+    if (mode === 'ingredient') {
+      if (bestIngredient) {
+        selectIngredient(bestIngredient);
+        setStatus(`Voice matched ${bestIngredient.name}.`);
+      } else {
+        setIngredientQuery(spokenQuery);
+        setSelectedIngredient(null);
+        setStatus('No strong ingredient match. Try again or type.');
+      }
+      return;
+    }
+
+    if (mode === 'dish') {
+      if (bestDish) {
+        await selectDish(bestDish, false);
+        setStatus(`Voice matched ${bestDish.name}.`);
+      } else if (bestIngredient) {
+        setMode('ingredient');
+        selectIngredient(bestIngredient);
+        setStatus(`Switched to Ingredients. Voice matched ${bestIngredient.name}.`);
+      } else {
+        setDishQuery(spokenQuery);
+        setSelectedDish(null);
+        setStatus('No strong dish match. Try again or type.');
+      }
+      return;
+    }
+
+    if (bestType === 'dish' && bestDish) {
+      setMode('dish');
+      await selectDish(bestDish, false);
+      setStatus(`Voice matched ${bestDish.name}.`);
+      return;
+    }
+
+    if (bestIngredient) {
+      selectInstantIngredient(bestIngredient);
+      setStatus(`Voice matched ${bestIngredient.name}.`);
+      return;
+    }
+
+    if (bestDish) {
+      setMode('dish');
+      await selectDish(bestDish, false);
+      setStatus(`Voice matched ${bestDish.name}.`);
+      return;
+    }
+
+    setInstantQuery(spokenQuery);
+    setSelectedInstant(null);
+    setStatus('No strong voice match yet. Try again or type.');
+  };
+
+  const handleVoiceTranscript = async (spokenText) => {
+    const spokenQuery = toVoiceQuery(spokenText);
+    if (!spokenQuery) {
+      setVoiceStatus('Could not understand. Try speaking food name again.');
+      return;
+    }
+
+    setVoiceBusy(true);
+    setVoiceStatus(`Heard: "${spokenQuery}". Searching...`);
+
+    try {
+      const payload = await resolveVoiceMatches(spokenQuery);
+      if (voiceRecognitionMode === 'manual') {
+        applyVoiceManualFlow(spokenQuery, payload);
+        setVoiceStatus('Voice suggestions ready. Select from the list.');
+      } else {
+        await applyVoiceAutoFlow(spokenQuery, payload);
+        setVoiceStatus('Voice match applied.');
+      }
+    } catch (error) {
+      setVoiceStatus('Voice search failed. Try again.');
+    } finally {
+      setVoiceBusy(false);
+    }
+  };
+
+  const stopVoiceRecognition = () => {
+    if (!voiceRecognitionRef.current) {
+      setVoiceListening(false);
+      return;
+    }
+    try {
+      voiceRecognitionRef.current.stop();
+    } catch (error) {
+      // no-op stop guard
+    } finally {
+      voiceRecognitionRef.current = null;
+      setVoiceListening(false);
+    }
+  };
+
+  const startVoiceRecognition = () => {
+    if (!canUseVoiceRecognition || !SpeechRecognitionCtor) {
+      setVoiceStatus('Voice input is unavailable in this browser. Use Chrome on mobile/desktop.');
+      return;
+    }
+
+    if (voiceListening) {
+      stopVoiceRecognition();
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 3;
+    recognition.lang = (typeof navigator !== 'undefined' && navigator.language) ? navigator.language : 'en-US';
+
+    recognition.onstart = () => {
+      setVoiceListening(true);
+      setVoiceStatus('Listening... say food name.');
+    };
+
+    recognition.onerror = (event) => {
+      const code = String(event?.error || '');
+      if (code === 'not-allowed' || code === 'service-not-allowed') {
+        setVoiceStatus('Microphone permission is blocked. Enable mic access in browser settings.');
+      } else if (code === 'no-speech') {
+        setVoiceStatus('No speech detected. Try again.');
+      } else if (code === 'aborted') {
+        setVoiceStatus('Voice input stopped.');
+      } else {
+        setVoiceStatus('Voice recognition failed. Retry.');
+      }
+    };
+
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results || [])
+        .map((result) => result?.[0]?.transcript || '')
+        .join(' ')
+        .trim();
+      if (transcript) {
+        void handleVoiceTranscript(transcript);
+      } else {
+        setVoiceStatus('Could not understand the voice input.');
+      }
+    };
+
+    recognition.onend = () => {
+      setVoiceListening(false);
+      if (voiceRecognitionRef.current === recognition) {
+        voiceRecognitionRef.current = null;
+      }
+    };
+
+    voiceRecognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+    } catch (error) {
+      voiceRecognitionRef.current = null;
+      setVoiceListening(false);
+      setVoiceStatus('Unable to start microphone.');
+    }
+  };
+
+  const triggerVoiceSearch = () => {
+    if (voiceBusy) {
+      return;
+    }
+    startVoiceRecognition();
   };
 
   const selectCustomIngredient = (ingredient) => {
@@ -1637,7 +2558,7 @@ function AddEntry({ userId, onEntryAdded }) {
       .filter((row) => row.ingredientId && parseNumber(row.quantity) > 0)
       .map((row) => ({
         ingredientId: row.ingredientId,
-        grams: toGrams(row.quantity, row.unit)
+        grams: toGrams(row.quantity, row.unit, row.ingredient)
       }));
 
     try {
@@ -1661,7 +2582,7 @@ function AddEntry({ userId, onEntryAdded }) {
     }, 360);
 
     return () => window.clearTimeout(timer);
-  }, [mode, selectedDish, dishAmount, dishUnit, customizeDish, customRows]);
+  }, [mode, selectedDish, customizeDish, customRows]);
 
   const findExistingIngredientByName = async (name) => {
     if (!normalizeText(name)) {
@@ -1737,6 +2658,32 @@ function AddEntry({ userId, onEntryAdded }) {
 
     if (selection.kind === 'ingredient') {
       return selection.ingredient?.id ? selection.ingredient : null;
+    }
+
+    if (selection.kind === 'scanned') {
+      if (selection.ingredient?.id) {
+        return selection.ingredient;
+      }
+
+      const scanPayload = selection.scan || selection.ingredient || null;
+      const synced = scanPayload ? await resolveScannedIngredient(scanPayload) : null;
+      if (synced?.id) {
+        setSelectedInstant((previous) => {
+          if (!previous || previous.kind !== 'scanned') {
+            return previous;
+          }
+          return {
+            ...previous,
+            ingredient: {
+              ...previous.ingredient,
+              ...synced,
+              id: synced.id
+            }
+          };
+        });
+        return synced;
+      }
+      return null;
     }
 
     const preset = normalizeInstantPreset(selection.preset);
@@ -1958,7 +2905,7 @@ function AddEntry({ userId, onEntryAdded }) {
               .filter((row) => row.ingredientId && parseNumber(row.quantity) > 0)
               .map((row) => ({
                 ingredientId: row.ingredientId,
-                grams: toGrams(row.quantity, row.unit)
+                grams: toGrams(row.quantity, row.unit, row.ingredient)
               }))
           : [];
 
@@ -1996,6 +2943,7 @@ function AddEntry({ userId, onEntryAdded }) {
     <div className="panel add-entry-panel">
       <div className="panel-title-row">
         <h2>Quick Logger</h2>
+        <p>Search, set amount, add.</p>
       </div>
 
       <div className="mode-switch mode-switch-pill">
@@ -2022,50 +2970,65 @@ function AddEntry({ userId, onEntryAdded }) {
         </button>
       </div>
 
+      <div className="entry-flow-strip" aria-label="Quick logging flow">
+        <span>1. Search</span>
+        <span>2. Amount</span>
+        <span>3. Add</span>
+      </div>
+      <div className="voice-mode-pill">
+        Voice Mode: <strong>{voiceRecognitionMode === 'manual' ? 'Manual suggestions' : 'Hands-free auto match'}</strong>
+      </div>
+
       <form onSubmit={handleCreateEntry} className="entry-form">
         {mode === 'instant' ? (
           <>
             <label>
-              Search
+              Food
               <div className="search-field quick-search-field">
                 <div className="quick-search-input-shell">
-                  <input
-                    type="text"
-                    value={instantQuery}
-                    placeholder="Search"
-                    onChange={(event) => {
-                      setInstantQuery(event.target.value);
-                      setSelectedInstant(null);
-                    }}
-                  />
-                  <span className={`quick-search-status ${instantLoading ? 'is-loading' : ''}`}>
-                    {instantSearchStatus}
-                  </span>
-                </div>
-                <div className="smart-search-controls">
-                  <div className="smart-search-scope">
-                    {INSTANT_SCOPE_OPTIONS.map((option) => (
-                      <button
-                        key={`scope-${option.id}`}
-                        type="button"
-                        className={instantSearchScope === option.id ? 'is-active' : ''}
-                        onClick={() => setInstantSearchScope(option.id)}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
+                  <div className="quick-search-input-row">
+                    <input
+                      type="text"
+                      value={instantQuery}
+                      placeholder="Type a food"
+                      onChange={(event) => {
+                        setInstantQuery(event.target.value);
+                        setSelectedInstant(null);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className={`voice-action-btn ${voiceListening ? 'is-listening' : ''}`}
+                      onClick={triggerVoiceSearch}
+                      disabled={!canUseVoiceRecognition || voiceBusy}
+                      title={
+                        !canUseVoiceRecognition
+                          ? 'Voice input unsupported'
+                          : voiceListening
+                            ? 'Stop voice input'
+                            : voiceRecognitionMode === 'manual'
+                              ? 'Voice input (manual suggestions)'
+                              : 'Voice input (hands-free auto match)'
+                      }
+                      aria-label={voiceListening ? 'Stop voice input' : 'Start voice input'}
+                    >
+                      {voiceListening ? '⏹' : '🎙'}
+                    </button>
                   </div>
-                  <label className="smart-search-sort">
-                    Sort
-                    <select value={instantSmartSort} onChange={(event) => setInstantSmartSort(event.target.value)}>
-                      {INSTANT_SORT_OPTIONS.map((option) => (
-                        <option key={`sort-${option.id}`} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  {instantSearchStatus && (
+                    <span className={`quick-search-status ${instantLoading ? 'is-loading' : ''}`}>
+                      {instantSearchStatus}
+                    </span>
+                  )}
+                  {voiceStatus && <span className="quick-search-status voice-status">{voiceStatus}</span>}
                 </div>
+                <button
+                  type="button"
+                  className={`entry-advanced-toggle ${instantAdvancedOpen ? 'is-open' : ''}`}
+                  onClick={() => setInstantAdvancedOpen((previous) => !previous)}
+                >
+                  {instantAdvancedOpen ? 'Hide advanced options' : 'Show advanced options'}
+                </button>
                 {instantSuggestionsVisible && (
                   <div className="search-suggestions search-suggestions-layered">
                     {(instantSearchScope === 'all' || instantSearchScope === 'instant') && (
@@ -2125,8 +3088,9 @@ function AddEntry({ userId, onEntryAdded }) {
                                 <div className="suggestion-meta-row">
                                   <span className="suggestion-kind-pill dish">Dish</span>
                                   <small>
-                                    {formatAmount(item.caloriesPerServing)} cal · P {formatAmount(item.proteinPerServing)}g · C {formatAmount(item.carbsPerServing)}g · F{' '}
-                                    {formatAmount(item.fatsPerServing)}g
+                                    {hasDishMacroSnapshot(item)
+                                      ? `${formatAmount(item.caloriesPerServing)} cal · P ${formatAmount(item.proteinPerServing)}g · C ${formatAmount(item.carbsPerServing)}g · F ${formatAmount(item.fatsPerServing)}g`
+                                      : 'Tap Open Dish for full nutrition'}
                                   </small>
                                 </div>
                               </div>
@@ -2194,16 +3158,183 @@ function AddEntry({ userId, onEntryAdded }) {
               </div>
             </label>
 
+            {instantAdvancedOpen && (
+              <div className="entry-advanced-stack">
+                <div className="smart-search-controls">
+                  <div className="smart-search-scope">
+                    {INSTANT_SCOPE_OPTIONS.map((option) => (
+                      <button
+                        key={`scope-${option.id}`}
+                        type="button"
+                        className={instantSearchScope === option.id ? 'is-active' : ''}
+                        onClick={() => setInstantSearchScope(option.id)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="smart-search-sort">
+                    Sort
+                    <select value={instantSmartSort} onChange={(event) => setInstantSmartSort(event.target.value)}>
+                      {INSTANT_SORT_OPTIONS.map((option) => (
+                        <option key={`sort-${option.id}`} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className={`scan-panel ${scanPanelOpen ? 'is-open' : ''}`}>
+                  <div className="scan-panel-head">
+                    <h3>Scan</h3>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        const nextOpen = !scanPanelOpen;
+                        setScanPanelOpen(nextOpen);
+                        if (!nextOpen) {
+                          stopLiveScan();
+                          setScanStatus('');
+                        }
+                      }}
+                    >
+                      {scanPanelOpen ? 'Hide' : 'Open Camera'}
+                    </button>
+                  </div>
+
+                  {scanPanelOpen && (
+                    <div className="scan-panel-body">
+                      <p>Scan barcode first. If missing, AI image recognition + smart matching will suggest foods automatically.</p>
+
+                      {canUseLiveBarcodeScan ? (
+                        <div className="scan-live-block">
+                          <video
+                            ref={scanVideoRef}
+                            className="scan-preview"
+                            muted
+                            playsInline
+                            autoPlay
+                          />
+                          <div className="scan-live-actions">
+                            {!scanLiveActive ? (
+                              <button type="button" className="secondary-btn" onClick={startLiveScan} disabled={scanBusy || scanAiBusy}>
+                                Start Camera
+                              </button>
+                            ) : (
+                              <button type="button" className="secondary-btn" onClick={stopLiveScan}>
+                                Stop Camera
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="scan-compat-note">Live camera barcode scan is unavailable here. Capture or upload a photo to continue.</div>
+                      )}
+
+                      <input
+                        ref={scanFileInputRef}
+                        type="file"
+                        className="scan-file-input"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={onScanCaptureFile}
+                      />
+                      <input
+                        ref={scanGalleryInputRef}
+                        type="file"
+                        className="scan-file-input"
+                        accept="image/*"
+                        onChange={onScanGalleryFile}
+                      />
+                      <div className="scan-alt-actions">
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          disabled={scanBusy || scanAiBusy}
+                          onClick={() => scanFileInputRef.current?.click()}
+                        >
+                          Capture Photo
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          disabled={scanBusy || scanAiBusy}
+                          onClick={() => scanGalleryInputRef.current?.click()}
+                        >
+                          Upload Gallery
+                        </button>
+                      </div>
+
+                      <div className="scan-manual-row">
+                        <input
+                          type="text"
+                          value={scanCodeInput}
+                          placeholder="Barcode (example: 8901058001021)"
+                          onChange={(event) => setScanCodeInput(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          disabled={scanBusy || scanAiBusy}
+                          onClick={onManualBarcodeLookup}
+                        >
+                          {scanBusy ? 'Checking...' : 'Lookup'}
+                        </button>
+                      </div>
+
+                      <div className="scan-compat-note">Scan engine: {scanEngineLabel}</div>
+
+                      {scanAiBusy && <div className="scan-status-line">AI analyzing photo...</div>}
+
+                      {!!scanAiCandidates.length && (
+                        <div className="scan-ai-candidates">
+                          <strong>AI Suggestions</strong>
+                          <div className="scan-ai-chip-row">
+                            {scanAiCandidates.map((candidate, index) => (
+                              <button
+                                key={`ai-candidate-${candidate.type}-${candidate.id || index}`}
+                                type="button"
+                                className="scan-ai-chip"
+                                disabled={scanBusy || scanAiBusy}
+                                onClick={() => applyAiCandidate(candidate)}
+                              >
+                                {candidate.name} ({Math.round(parseNumber(candidate.confidence, 0) * 100)}%)
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {scanResult?.found && (
+                        <div className="scan-result-row">
+                          <FoodThumb item={scanResult} bucket="instant" className="food-thumb food-thumb-inline" />
+                          <span>
+                            <strong>{scanResult.name}</strong>
+                            {scanResult.brand ? ` · ${scanResult.brand}` : ''}
+                            {scanResult.factChecked ? ' · verified' : ' · partial data'}
+                          </span>
+                        </div>
+                      )}
+
+                      {scanStatus && <div className="scan-status-line">{scanStatus}</div>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="quantity-cluster">
-              <span className="input-caption">Weight / volume</span>
+              <span className="input-caption">Amount</span>
               <div className="quantity-row">
                 <button type="button" className="qty-step-btn" onClick={() => shiftInstantQuantity(-1)}>
-                  -10g
+                  {getUnitStepLabel(instantUnit, -1)}
                 </button>
                 <input
                   type="number"
                   min="0"
-                  step={instantUnit === 'kg' || instantUnit === 'l' ? '0.01' : '1'}
+                  step={getQuantityInputStep(instantUnit)}
                   value={instantQuantity}
                   onChange={(event) => setInstantQuantity(event.target.value)}
                 />
@@ -2215,13 +3346,13 @@ function AddEntry({ userId, onEntryAdded }) {
                   ))}
                 </select>
                 <button type="button" className="qty-step-btn" onClick={() => shiftInstantQuantity(1)}>
-                  +10g
+                  {getUnitStepLabel(instantUnit, 1)}
                 </button>
               </div>
               <div className="preset-row">
-                {WEIGHT_PRESETS.map((value) => (
+                {getUnitPresets(instantUnit).map((value) => (
                   <button key={`instant-${value}`} type="button" onClick={() => setInstantQuantity(value)}>
-                    {value}
+                    {formatUnitPresetLabel(value, instantUnit)}
                   </button>
                 ))}
               </div>
@@ -2236,183 +3367,184 @@ function AddEntry({ userId, onEntryAdded }) {
                   className="food-thumb food-thumb-inline"
                 />
                 <span>
-                  Selected: <strong>{selectedInstant.ingredient?.name}</strong> · {selectedInstant.kind === 'preset' ? 'Instant preset' : 'Ingredient'} ·{' '}
-                  {selectedInstant.ingredient?.category || 'Global'}
+                  <strong>{selectedInstant.ingredient?.name}</strong> · {selectedInstant.ingredient?.category || 'Global'}
                 </span>
               </div>
             )}
 
-            <div className="instant-preset-builder">
-              <div className="instant-builder-head">
-                <div>
-                  <h3>Custom Preset</h3>
-                </div>
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  onClick={() => {
-                    setShowPresetBuilder((previous) => !previous);
-                    setPresetStatus('');
-                  }}
-                >
-                  {showPresetBuilder ? 'Close Creator' : 'Create Preset'}
-                </button>
-              </div>
-
-              {showPresetBuilder && (
-                <div className="instant-builder-body">
-                  <div className="instant-builder-grid">
-                    <label>
-                      Preset name
-                      <input
-                        type="text"
-                        value={presetDraft.name}
-                        placeholder="Example: Coconut water"
-                        onChange={(event) => onPresetDraftChange('name', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Aliases (comma separated)
-                      <input
-                        type="text"
-                        value={presetDraft.aliases}
-                        placeholder="Example: tender coconut, nariyal pani"
-                        onChange={(event) => onPresetDraftChange('aliases', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Serving quantity
-                      <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={presetDraft.quantity}
-                        onChange={(event) => onPresetDraftChange('quantity', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Unit
-                      <select value={presetDraft.unit} onChange={(event) => onPresetDraftChange('unit', event.target.value)}>
-                        {UNIT_OPTIONS.map((option) => (
-                          <option key={`preset-unit-${option}`} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Category
-                      <select value={presetDraft.category} onChange={(event) => onPresetDraftChange('category', event.target.value)}>
-                        {INSTANT_CATEGORY_OPTIONS.map((option) => (
-                          <option key={`preset-category-${option}`} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Cuisine
-                      <input
-                        type="text"
-                        value={presetDraft.cuisine}
-                        placeholder="Global"
-                        onChange={(event) => onPresetDraftChange('cuisine', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Calories /100g
-                      <input
-                        type="number"
-                        min="1"
-                        step="0.1"
-                        value={presetDraft.caloriesPer100g}
-                        onChange={(event) => onPresetDraftChange('caloriesPer100g', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Protein /100g
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={presetDraft.proteinPer100g}
-                        onChange={(event) => onPresetDraftChange('proteinPer100g', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Carbs /100g
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={presetDraft.carbsPer100g}
-                        onChange={(event) => onPresetDraftChange('carbsPer100g', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Fats /100g
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={presetDraft.fatsPer100g}
-                        onChange={(event) => onPresetDraftChange('fatsPer100g', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Fibre /100g
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={presetDraft.fiberPer100g}
-                        onChange={(event) => onPresetDraftChange('fiberPer100g', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Base Price (USD per kg/l)
-                      <input
-                        type="number"
-                        min="0.01"
-                        step="0.01"
-                        value={presetDraft.averagePriceUsd}
-                        onChange={(event) => onPresetDraftChange('averagePriceUsd', event.target.value)}
-                      />
-                    </label>
-                  </div>
-                  <div className="instant-builder-actions">
-                    <button type="button" className="primary-btn" disabled={presetSaving} onClick={createCustomPreset}>
-                      {presetSaving ? 'Saving Preset...' : 'Save Preset'}
+            {instantAdvancedOpen && (
+              <>
+                <div className={`instant-preset-builder ${!showPresetBuilder && !customInstantPresets.length ? 'is-collapsed' : ''}`}>
+                  <div className="instant-builder-head">
+                    <h3>Custom preset</h3>
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        setShowPresetBuilder((previous) => !previous);
+                        setPresetStatus('');
+                      }}
+                    >
+                      {showPresetBuilder ? 'Close Creator' : 'Create Preset'}
                     </button>
                   </div>
-                </div>
-              )}
 
-              {customInstantPresets.length > 0 && (
-                <div className="instant-custom-preset-list">
-                  {customInstantPresets.slice(0, 8).map((preset) => (
-                    <div className="instant-custom-preset-item" key={`custom-preset-${preset.id}`}>
-                      <div>
-                        <strong>{preset.label}</strong>
-                        <small>
-                          {formatServingLabel(preset.quantity, preset.unit)} · {preset.fallback.cuisine}
-                        </small>
+                  {showPresetBuilder && (
+                    <div className="instant-builder-body">
+                      <div className="instant-builder-grid">
+                        <label>
+                          Preset name
+                          <input
+                            type="text"
+                            value={presetDraft.name}
+                            placeholder="Example: Coconut water"
+                            onChange={(event) => onPresetDraftChange('name', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Aliases (comma separated)
+                          <input
+                            type="text"
+                            value={presetDraft.aliases}
+                            placeholder="Example: tender coconut, nariyal pani"
+                            onChange={(event) => onPresetDraftChange('aliases', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Serving quantity
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={presetDraft.quantity}
+                            onChange={(event) => onPresetDraftChange('quantity', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Unit
+                          <select value={presetDraft.unit} onChange={(event) => onPresetDraftChange('unit', event.target.value)}>
+                            {UNIT_OPTIONS.map((option) => (
+                              <option key={`preset-unit-${option}`} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Category
+                          <select value={presetDraft.category} onChange={(event) => onPresetDraftChange('category', event.target.value)}>
+                            {INSTANT_CATEGORY_OPTIONS.map((option) => (
+                              <option key={`preset-category-${option}`} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Cuisine
+                          <input
+                            type="text"
+                            value={presetDraft.cuisine}
+                            placeholder="Global"
+                            onChange={(event) => onPresetDraftChange('cuisine', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Calories /100g
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.1"
+                            value={presetDraft.caloriesPer100g}
+                            onChange={(event) => onPresetDraftChange('caloriesPer100g', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Protein /100g
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={presetDraft.proteinPer100g}
+                            onChange={(event) => onPresetDraftChange('proteinPer100g', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Carbs /100g
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={presetDraft.carbsPer100g}
+                            onChange={(event) => onPresetDraftChange('carbsPer100g', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Fats /100g
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={presetDraft.fatsPer100g}
+                            onChange={(event) => onPresetDraftChange('fatsPer100g', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Fibre /100g
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={presetDraft.fiberPer100g}
+                            onChange={(event) => onPresetDraftChange('fiberPer100g', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Base Price (USD per kg/l)
+                          <input
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            value={presetDraft.averagePriceUsd}
+                            onChange={(event) => onPresetDraftChange('averagePriceUsd', event.target.value)}
+                          />
+                        </label>
                       </div>
-                      <div className="instant-custom-preset-actions">
-                        <button type="button" onClick={() => selectInstantPreset(preset)}>
-                          Use
-                        </button>
-                        <button type="button" onClick={() => removeCustomPreset(preset.id)}>
-                          Delete
+                      <div className="instant-builder-actions">
+                        <button type="button" className="primary-btn" disabled={presetSaving} onClick={createCustomPreset}>
+                          {presetSaving ? 'Saving Preset...' : 'Save Preset'}
                         </button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                  )}
 
-            {presetStatus && <div className="status-line">{presetStatus}</div>}
+                  {customInstantPresets.length > 0 && (
+                    <div className="instant-custom-preset-list">
+                      {customInstantPresets.slice(0, 8).map((preset) => (
+                        <div className="instant-custom-preset-item" key={`custom-preset-${preset.id}`}>
+                          <div>
+                            <strong>{preset.label}</strong>
+                            <small>
+                              {formatServingLabel(preset.quantity, preset.unit)} · {preset.fallback.cuisine}
+                            </small>
+                          </div>
+                          <div className="instant-custom-preset-actions">
+                            <button type="button" onClick={() => selectInstantPreset(preset)}>
+                              Use
+                            </button>
+                            <button type="button" onClick={() => removeCustomPreset(preset.id)}>
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {presetStatus && <div className="status-line">{presetStatus}</div>}
+              </>
+            )}
           </>
         ) : mode === 'ingredient' ? (
           <>
@@ -2420,18 +3552,41 @@ function AddEntry({ userId, onEntryAdded }) {
               Search ingredient
               <div className="search-field quick-search-field">
                 <div className="quick-search-input-shell">
-                  <input
-                    type="text"
-                    value={ingredientQuery}
-                    placeholder="Search ingredient"
-                    onChange={(event) => {
-                      setIngredientQuery(event.target.value);
-                      setSelectedIngredient(null);
-                    }}
-                  />
-                  <span className={`quick-search-status ${ingredientLoading ? 'is-loading' : ''}`}>
-                    {ingredientSearchStatus}
-                  </span>
+                  <div className="quick-search-input-row">
+                    <input
+                      type="text"
+                      value={ingredientQuery}
+                      placeholder="Search ingredient"
+                      onChange={(event) => {
+                        setIngredientQuery(event.target.value);
+                        setSelectedIngredient(null);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className={`voice-action-btn ${voiceListening ? 'is-listening' : ''}`}
+                      onClick={triggerVoiceSearch}
+                      disabled={!canUseVoiceRecognition || voiceBusy}
+                      title={
+                        !canUseVoiceRecognition
+                          ? 'Voice input unsupported'
+                          : voiceListening
+                            ? 'Stop voice input'
+                            : voiceRecognitionMode === 'manual'
+                              ? 'Voice input (manual suggestions)'
+                              : 'Voice input (hands-free auto match)'
+                      }
+                      aria-label={voiceListening ? 'Stop voice input' : 'Start voice input'}
+                    >
+                      {voiceListening ? '⏹' : '🎙'}
+                    </button>
+                  </div>
+                  {ingredientSearchStatus && (
+                    <span className={`quick-search-status ${ingredientLoading ? 'is-loading' : ''}`}>
+                      {ingredientSearchStatus}
+                    </span>
+                  )}
+                  {voiceStatus && <span className="quick-search-status voice-status">{voiceStatus}</span>}
                 </div>
                 {ingredientSuggestionsVisible && (
                   <div className="search-suggestions">
@@ -2479,15 +3634,15 @@ function AddEntry({ userId, onEntryAdded }) {
             </label>
 
             <div className="quantity-cluster">
-              <span className="input-caption">Weight / volume</span>
+              <span className="input-caption">Amount</span>
               <div className="quantity-row">
                 <button type="button" className="qty-step-btn" onClick={() => shiftMainQuantity(-1)}>
-                  -10g
+                  {getUnitStepLabel(unit, -1)}
                 </button>
                 <input
                   type="number"
                   min="0"
-                  step={unit === 'kg' || unit === 'l' ? '0.01' : '1'}
+                  step={getQuantityInputStep(unit)}
                   value={quantity}
                   onChange={(event) => setQuantity(event.target.value)}
                 />
@@ -2499,13 +3654,13 @@ function AddEntry({ userId, onEntryAdded }) {
                   ))}
                 </select>
                 <button type="button" className="qty-step-btn" onClick={() => shiftMainQuantity(1)}>
-                  +10g
+                  {getUnitStepLabel(unit, 1)}
                 </button>
               </div>
               <div className="preset-row">
-                {WEIGHT_PRESETS.map((value) => (
+                {getUnitPresets(unit).map((value) => (
                   <button key={value} type="button" onClick={() => setQuantity(value)}>
-                    {value}
+                    {formatUnitPresetLabel(value, unit)}
                   </button>
                 ))}
               </div>
@@ -2515,8 +3670,7 @@ function AddEntry({ userId, onEntryAdded }) {
               <div className="selected-line with-thumb">
                 <FoodThumb item={selectedIngredient} bucket="ingredient" className="food-thumb food-thumb-inline" />
                 <span>
-                  Selected: <strong>{selectedIngredient.name}</strong> · {selectedIngredient.category} ·{' '}
-                  {(selectedIngredient.regionalAvailability || []).slice(0, 2).join(' / ') || 'Global'}
+                  <strong>{selectedIngredient.name}</strong> · {selectedIngredient.category}
                 </span>
               </div>
             )}
@@ -2528,7 +3682,7 @@ function AddEntry({ userId, onEntryAdded }) {
                 disabled={!selectedIngredient || parseNumber(quantity) <= 0}
                 onClick={addIngredientToMix}
               >
-                Add To Ingredient Mix
+                Add to mix
               </button>
               {!!ingredientMixRows.length && (
                 <button type="button" className="secondary-btn" onClick={() => setIngredientMixRows([])}>
@@ -2537,58 +3691,60 @@ function AddEntry({ userId, onEntryAdded }) {
               )}
             </div>
 
-            <div className="ingredient-mix-panel">
-              <div className="ingredient-mix-head">
-                <h4>Ingredient Mix</h4>
-                <small>{ingredientMixRows.length ? `${ingredientMixRows.length} items` : 'Add ingredients to compare totals'}</small>
-              </div>
-              {ingredientMixLineItems.length ? (
-                <>
-                  {ingredientMixLineItems.map((row, index) => (
-                    <div className="ingredient-mix-row" key={row.key}>
-                      <div className="ingredient-mix-meta">
-                        <strong>{row.ingredient?.name}</strong>
-                        <small>
-                          {formatAmount(row.nutrition.calories)} cal · P {formatAmount(row.nutrition.protein)}g · C {formatAmount(row.nutrition.carbs)}g · F{' '}
-                          {formatAmount(row.nutrition.fats)}g
-                        </small>
+            {(ingredientMixRows.length > 0 || selectedIngredient) && (
+              <div className="ingredient-mix-panel">
+                <div className="ingredient-mix-head">
+                  <h4>Ingredient Mix</h4>
+                  <small>{ingredientMixRows.length ? `${ingredientMixRows.length} items` : 'Add ingredients to compare totals'}</small>
+                </div>
+                {ingredientMixLineItems.length ? (
+                  <>
+                    {ingredientMixLineItems.map((row, index) => (
+                      <div className="ingredient-mix-row" key={row.key}>
+                        <div className="ingredient-mix-meta">
+                          <strong>{row.ingredient?.name}</strong>
+                          <small>
+                            {formatAmount(row.nutrition.calories)} cal · P {formatAmount(row.nutrition.protein)}g · C {formatAmount(row.nutrition.carbs)}g · F{' '}
+                            {formatAmount(row.nutrition.fats)}g
+                          </small>
+                        </div>
+                        <div className="ingredient-mix-controls">
+                          <button type="button" className="qty-step-btn" onClick={() => shiftIngredientMixQuantity(index, -1)}>
+                            {getUnitStepLabel(row.unit, -1)}
+                          </button>
+                          <input
+                            type="number"
+                            min="0"
+                            step={getQuantityInputStep(row.unit)}
+                            value={row.quantity}
+                            onChange={(event) => updateIngredientMixRow(index, { quantity: event.target.value })}
+                          />
+                          <select value={row.unit} onChange={(event) => updateIngredientMixRow(index, { unit: event.target.value })}>
+                            {UNIT_OPTIONS.map((option) => (
+                              <option key={`${row.key}-${option}`} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                          <button type="button" className="qty-step-btn" onClick={() => shiftIngredientMixQuantity(index, 1)}>
+                            {getUnitStepLabel(row.unit, 1)}
+                          </button>
+                          <button type="button" className="ingredient-mix-remove" onClick={() => removeIngredientFromMix(index)}>
+                            Remove
+                          </button>
+                        </div>
                       </div>
-                      <div className="ingredient-mix-controls">
-                        <button type="button" className="qty-step-btn" onClick={() => shiftIngredientMixQuantity(index, -1)}>
-                          -10g
-                        </button>
-                        <input
-                          type="number"
-                          min="0"
-                          step={row.unit === 'kg' || row.unit === 'l' ? '0.01' : '1'}
-                          value={row.quantity}
-                          onChange={(event) => updateIngredientMixRow(index, { quantity: event.target.value })}
-                        />
-                        <select value={row.unit} onChange={(event) => updateIngredientMixRow(index, { unit: event.target.value })}>
-                          {UNIT_OPTIONS.map((option) => (
-                            <option key={`${row.key}-${option}`} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                        <button type="button" className="qty-step-btn" onClick={() => shiftIngredientMixQuantity(index, 1)}>
-                          +10g
-                        </button>
-                        <button type="button" className="ingredient-mix-remove" onClick={() => removeIngredientFromMix(index)}>
-                          Remove
-                        </button>
-                      </div>
+                    ))}
+                    <div className="ingredient-mix-total">
+                      Total: <strong>{formatAmount(ingredientMixTotals.calories)} cal</strong> · P {formatAmount(ingredientMixTotals.protein)}g · C{' '}
+                      {formatAmount(ingredientMixTotals.carbs)}g · F {formatAmount(ingredientMixTotals.fats)}g · Fi {formatAmount(ingredientMixTotals.fiber)}g
                     </div>
-                  ))}
-                  <div className="ingredient-mix-total">
-                    Total: <strong>{formatAmount(ingredientMixTotals.calories)} cal</strong> · P {formatAmount(ingredientMixTotals.protein)}g · C{' '}
-                    {formatAmount(ingredientMixTotals.carbs)}g · F {formatAmount(ingredientMixTotals.fats)}g · Fi {formatAmount(ingredientMixTotals.fiber)}g
-                  </div>
-                </>
-              ) : (
-                <div className="ingredient-mix-empty">Search, choose ingredient, set quantity, then tap "Add To Ingredient Mix".</div>
-              )}
-            </div>
+                  </>
+                ) : (
+                  <div className="ingredient-mix-empty">No items in mix.</div>
+                )}
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -2596,18 +3752,39 @@ function AddEntry({ userId, onEntryAdded }) {
               Search dish
               <div className="search-field quick-search-field">
                 <div className="quick-search-input-shell">
-                  <input
-                    type="text"
-                    value={dishQuery}
-                    placeholder="Search dish"
-                    onChange={(event) => {
-                      setDishQuery(event.target.value);
-                      setSelectedDish(null);
-                      setCustomizeDish(false);
-                      setCustomRows([]);
-                    }}
-                  />
-                  <span className={`quick-search-status ${dishLoading ? 'is-loading' : ''}`}>{dishSearchStatus}</span>
+                  <div className="quick-search-input-row">
+                    <input
+                      type="text"
+                      value={dishQuery}
+                      placeholder="Search dish"
+                      onChange={(event) => {
+                        setDishQuery(event.target.value);
+                        setSelectedDish(null);
+                        setCustomizeDish(false);
+                        setCustomRows([]);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className={`voice-action-btn ${voiceListening ? 'is-listening' : ''}`}
+                      onClick={triggerVoiceSearch}
+                      disabled={!canUseVoiceRecognition || voiceBusy}
+                      title={
+                        !canUseVoiceRecognition
+                          ? 'Voice input unsupported'
+                          : voiceListening
+                            ? 'Stop voice input'
+                            : voiceRecognitionMode === 'manual'
+                              ? 'Voice input (manual suggestions)'
+                              : 'Voice input (hands-free auto match)'
+                      }
+                      aria-label={voiceListening ? 'Stop voice input' : 'Start voice input'}
+                    >
+                      {voiceListening ? '⏹' : '🎙'}
+                    </button>
+                  </div>
+                  {dishSearchStatus && <span className={`quick-search-status ${dishLoading ? 'is-loading' : ''}`}>{dishSearchStatus}</span>}
+                  {voiceStatus && <span className="quick-search-status voice-status">{voiceStatus}</span>}
                 </div>
                 {dishSuggestionsVisible && (
                   <div className="search-suggestions">
@@ -2623,8 +3800,9 @@ function AddEntry({ userId, onEntryAdded }) {
                             <div className="suggestion-meta-row">
                               <span className="suggestion-kind-pill dish">Dish</span>
                               <small>
-                                P {formatAmount(item.proteinPerServing)}g · C {formatAmount(item.carbsPerServing)}g · F {formatAmount(item.fatsPerServing)}g · Fi{' '}
-                                {formatAmount(item.fiberPerServing)}g
+                                {hasDishMacroSnapshot(item)
+                                  ? `P ${formatAmount(item.proteinPerServing)}g · C ${formatAmount(item.carbsPerServing)}g · F ${formatAmount(item.fatsPerServing)}g · Fi ${formatAmount(item.fiberPerServing)}g`
+                                  : 'Select to load full nutrition'}
                               </small>
                             </div>
                             <small>
@@ -2670,12 +3848,12 @@ function AddEntry({ userId, onEntryAdded }) {
                   const step = getUnitStepForTenGrams(dishUnit);
                   setDishAmount(Math.max(0, parseNumber(dishAmount, 0) - step));
                 }}>
-                  -10g
+                  {getUnitStepLabel(dishUnit, -1)}
                 </button>
                 <input
                   type="number"
                   min="0"
-                  step={dishUnit === 'kg' || dishUnit === 'l' ? '0.01' : '1'}
+                  step={getQuantityInputStep(dishUnit)}
                   value={dishAmount}
                   onChange={(event) => setDishAmount(event.target.value)}
                 />
@@ -2690,13 +3868,13 @@ function AddEntry({ userId, onEntryAdded }) {
                   const step = getUnitStepForTenGrams(dishUnit);
                   setDishAmount(Math.max(0, parseNumber(dishAmount, 0) + step));
                 }}>
-                  +10g
+                  {getUnitStepLabel(dishUnit, 1)}
                 </button>
               </div>
               <div className="preset-row">
-                {WEIGHT_PRESETS.map((value) => (
+                {getUnitPresets(dishUnit).map((value) => (
                   <button key={`dish-${value}`} type="button" onClick={() => setDishAmount(value)}>
-                    {value}
+                    {formatUnitPresetLabel(value, dishUnit)}
                   </button>
                 ))}
               </div>
@@ -2725,7 +3903,7 @@ function AddEntry({ userId, onEntryAdded }) {
               <div className="selected-line with-thumb">
                 <FoodThumb item={selectedDish} bucket="dish" className="food-thumb food-thumb-inline" />
                 <span>
-                  Selected: <strong>{selectedDish.name}</strong> · {selectedDish.cuisine}
+                  <strong>{selectedDish.name}</strong> · {selectedDish.cuisine}
                 </span>
               </div>
             )}
@@ -2746,7 +3924,7 @@ function AddEntry({ userId, onEntryAdded }) {
                     <input
                       type="number"
                       min="0"
-                      step={row.unit === 'kg' || row.unit === 'l' ? '0.01' : '1'}
+                      step={getQuantityInputStep(row.unit)}
                       value={row.quantity}
                       onChange={(event) => updateCustomRow(index, { quantity: event.target.value })}
                     />
@@ -2762,10 +3940,10 @@ function AddEntry({ userId, onEntryAdded }) {
                     </select>
                     <div className="mini-actions">
                       <button type="button" onClick={() => shiftRowQuantity(index, -1)}>
-                        -10g
+                        {getUnitStepLabel(row.unit, -1)}
                       </button>
                       <button type="button" onClick={() => shiftRowQuantity(index, 1)}>
-                        +10g
+                        {getUnitStepLabel(row.unit, 1)}
                       </button>
                     </div>
                     <button type="button" onClick={() => removeCustomIngredient(index)}>
@@ -2786,7 +3964,7 @@ function AddEntry({ userId, onEntryAdded }) {
                           setCustomSelection(null);
                         }}
                       />
-                      <span className={`quick-search-status ${customLoading ? 'is-loading' : ''}`}>{customSearchStatus}</span>
+                      {customSearchStatus && <span className={`quick-search-status ${customLoading ? 'is-loading' : ''}`}>{customSearchStatus}</span>}
                     </div>
                     {customSuggestionsVisible && (
                       <div className="search-suggestions">
@@ -2831,12 +4009,12 @@ function AddEntry({ userId, onEntryAdded }) {
 
                   <div className="quantity-row compact-row">
                     <button type="button" className="qty-step-btn" onClick={() => shiftCustomQuantity(-1)}>
-                      -10g
+                      {getUnitStepLabel(customUnit, -1)}
                     </button>
                     <input
                       type="number"
                       min="0"
-                      step={customUnit === 'kg' || customUnit === 'l' ? '0.01' : '1'}
+                      step={getQuantityInputStep(customUnit)}
                       value={customQuantity}
                       onChange={(event) => setCustomQuantity(event.target.value)}
                     />
@@ -2848,14 +4026,14 @@ function AddEntry({ userId, onEntryAdded }) {
                       ))}
                     </select>
                     <button type="button" className="qty-step-btn" onClick={() => shiftCustomQuantity(1)}>
-                      +10g
+                      {getUnitStepLabel(customUnit, 1)}
                     </button>
                   </div>
 
                   <div className="preset-row">
-                    {WEIGHT_PRESETS.map((value) => (
+                    {getUnitPresets(customUnit).map((value) => (
                       <button key={`custom-${value}`} type="button" onClick={() => setCustomQuantity(value)}>
-                        {value}
+                        {formatUnitPresetLabel(value, customUnit)}
                       </button>
                     ))}
                   </div>

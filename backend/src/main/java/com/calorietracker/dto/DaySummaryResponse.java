@@ -9,6 +9,10 @@ public class DaySummaryResponse {
     private Integer dailyGoal;
     private Double remainingCalories;
     private Integer entryCount;
+    private Double totalProtein;
+    private Double totalCarbs;
+    private Double totalFats;
+    private Double totalFiber;
 
     public LocalDate getDate() {
         return date;
@@ -48,5 +52,37 @@ public class DaySummaryResponse {
 
     public void setEntryCount(Integer entryCount) {
         this.entryCount = entryCount;
+    }
+
+    public Double getTotalProtein() {
+        return totalProtein;
+    }
+
+    public void setTotalProtein(Double totalProtein) {
+        this.totalProtein = totalProtein;
+    }
+
+    public Double getTotalCarbs() {
+        return totalCarbs;
+    }
+
+    public void setTotalCarbs(Double totalCarbs) {
+        this.totalCarbs = totalCarbs;
+    }
+
+    public Double getTotalFats() {
+        return totalFats;
+    }
+
+    public void setTotalFats(Double totalFats) {
+        this.totalFats = totalFats;
+    }
+
+    public Double getTotalFiber() {
+        return totalFiber;
+    }
+
+    public void setTotalFiber(Double totalFiber) {
+        this.totalFiber = totalFiber;
     }
 }

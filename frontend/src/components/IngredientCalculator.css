@@ -54,6 +54,7 @@
   gap: 2px;
   margin-bottom: 4px;
   transition:
+    transform var(--motion-medium) var(--motion-spring),
     border-color var(--motion-fast) var(--ease-out-soft),
     background-color var(--motion-fast) var(--ease-out-soft),
     box-shadow var(--motion-fast) var(--ease-out-soft);
@@ -62,7 +63,8 @@
 .calc-suggestion-item:hover {
   border-color: var(--brand-soft);
   background: var(--surface-2);
-  box-shadow: 0 6px 14px rgba(7, 24, 48, 0.08);
+  transform: translateY(-2px);
+  box-shadow: var(--hover-pop-shadow);
 }
 
 .calc-suggestion-item span {

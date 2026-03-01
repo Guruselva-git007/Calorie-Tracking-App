@@ -9,6 +9,7 @@ import com.calorietracker.dto.UpdateUserProfileRequest;
 import com.calorietracker.entity.AppUser;
 import com.calorietracker.repository.AppUserRepository;
 
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 @Service
@@ -74,7 +75,50 @@ public class UserService {
                 StringUtils.hasText(request.getMedicalIllness()) ? request.getMedicalIllness().trim() : null
             );
         }
+        if (request.getLikedFoods() != null) {
+            user.setLikedFoods(
+                StringUtils.hasText(request.getLikedFoods()) ? request.getLikedFoods().trim() : null
+            );
+        }
+        if (request.getProfileImageUrl() != null) {
+            user.setProfileImageUrl(sanitizeProfileImageUrl(request.getProfileImageUrl()));
+        }
 
         return appUserRepository.save(user);
+    }
+
+    private String sanitizeProfileImageUrl(String value) {
+        if (!StringUtils.hasText(value)) {
+            return null;
+        }
+
+        String candidate = value.trim();
+        String lowered = candidate.toLowerCase();
+
+        if (lowered.startsWith("data:image/")) {
+            if (candidate.length() > 50000) {
+                throw new ResponseStatusException(BAD_REQUEST, "Profile image is too large. Use a smaller image.");
+            }
+            return candidate;
+        }
+
+        if (lowered.startsWith("http://") || lowered.startsWith("https://")) {
+            if (candidate.length() > 2000) {
+                throw new ResponseStatusException(BAD_REQUEST, "Profile image URL is too long.");
+            }
+            return candidate;
+        }
+
+        if (lowered.startsWith("/api/media/") || lowered.startsWith("api/media/")) {
+            if (candidate.length() > 2000) {
+                throw new ResponseStatusException(BAD_REQUEST, "Profile image path is too long.");
+            }
+            return candidate.startsWith("/") ? candidate : "/" + candidate;
+        }
+
+        throw new ResponseStatusException(
+            BAD_REQUEST,
+            "Invalid profile image format. Use image URL or uploaded image."
+        );
     }
 }

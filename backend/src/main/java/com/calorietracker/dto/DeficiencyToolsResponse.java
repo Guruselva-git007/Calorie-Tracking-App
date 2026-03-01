@@ -13,6 +13,8 @@ public class DeficiencyToolsResponse {
     private List<String> currencies = new ArrayList<>();
     private Instant generatedAt;
     private List<DeficiencyRecommendationItem> recommendations = new ArrayList<>();
+    private List<DietPlanSection> dietPlan = new ArrayList<>();
+    private List<DeficiencyInsight> deficiencyInsights = new ArrayList<>();
     private List<String> notes = new ArrayList<>();
 
     public String getRegion() {
@@ -69,6 +71,22 @@ public class DeficiencyToolsResponse {
 
     public void setRecommendations(List<DeficiencyRecommendationItem> recommendations) {
         this.recommendations = recommendations;
+    }
+
+    public List<DietPlanSection> getDietPlan() {
+        return dietPlan;
+    }
+
+    public void setDietPlan(List<DietPlanSection> dietPlan) {
+        this.dietPlan = dietPlan;
+    }
+
+    public List<DeficiencyInsight> getDeficiencyInsights() {
+        return deficiencyInsights;
+    }
+
+    public void setDeficiencyInsights(List<DeficiencyInsight> deficiencyInsights) {
+        this.deficiencyInsights = deficiencyInsights == null ? new ArrayList<>() : deficiencyInsights;
     }
 
     public List<String> getNotes() {

@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MAX_ATTEMPTS="${RUN_MAX_ATTEMPTS:-4}"
+HEALTH_WAIT_SECONDS="${RUN_HEALTH_WAIT_SECONDS:-60}"
+BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-http://127.0.0.1:8080/api/health}"
+FRONTEND_HEALTH_URL="${FRONTEND_HEALTH_URL:-http://127.0.0.1:3000}"
+MYSQL_START_WAIT_SECONDS="${RUN_MYSQL_WAIT_SECONDS:-12}"
+BACKEND_START_RETRIES="${RUN_BACKEND_START_RETRIES:-6}"
+RUN_SERVER_ADDRESS="${RUN_SERVER_ADDRESS:-0.0.0.0}"
+RUN_FRONTEND_HOST="${RUN_FRONTEND_HOST:-0.0.0.0}"
+RUN_DIR="$ROOT_DIR/.run"
+
+probe_backend() {
+  local body
+  body="$(curl -sS --max-time 4 "$BACKEND_HEALTH_URL" 2>/dev/null || true)"
+  [[ "$body" == *"\"status\":\"UP\""* ]]
+}
+
+probe_frontend() {
+  curl -fsS --max-time 4 "$FRONTEND_HEALTH_URL" >/dev/null 2>&1
+}
+
+warmup_requests() {
+  curl -sS --max-time 3 "$BACKEND_HEALTH_URL" >/dev/null 2>&1 || true
+  curl -sS --max-time 3 "http://127.0.0.1:8080/api/ingredients?search=rice&limit=8" >/dev/null 2>&1 || true
+  curl -sS --max-time 3 "http://127.0.0.1:8080/api/dishes/suggest?search=chicken&limit=8" >/dev/null 2>&1 || true
+  curl -sS --max-time 3 "$FRONTEND_HEALTH_URL" >/dev/null 2>&1 || true
+}
+
+sync_pid_files_from_ports() {
+  mkdir -p "$RUN_DIR"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local backend_pid
+  local frontend_pid
+  backend_pid="$(lsof -tiTCP:8080 -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+  frontend_pid="$(lsof -tiTCP:3000 -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+
+  if [[ -n "$backend_pid" ]]; then
+    printf "%s\n" "$backend_pid" >"$RUN_DIR/backend.pid"
+  fi
+  if [[ -n "$frontend_pid" ]]; then
+    printf "%s\n" "$frontend_pid" >"$RUN_DIR/frontend.pid"
+  fi
+}
+
+wait_for_health() {
+  local deadline=$((SECONDS + HEALTH_WAIT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if probe_backend && probe_frontend; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+if probe_backend && probe_frontend; then
+  echo "run: app is already healthy."
+  sync_pid_files_from_ports
+  warmup_requests
+  "$ROOT_DIR/scripts/status.sh" || true
+  exit 0
+fi
+
+for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
+  echo "run: attempt $attempt/$MAX_ATTEMPTS"
+  MYSQL_START_WAIT_SECONDS="$MYSQL_START_WAIT_SECONDS" \
+  BACKEND_START_RETRIES="$BACKEND_START_RETRIES" \
+  SERVER_ADDRESS="$RUN_SERVER_ADDRESS" \
+  FRONTEND_HOST="$RUN_FRONTEND_HOST" \
+    "$ROOT_DIR/scripts/start-all.sh" || true
+
+  if wait_for_health; then
+    echo "run: app is healthy."
+    sync_pid_files_from_ports
+    warmup_requests
+    "$ROOT_DIR/scripts/status.sh" || true
+    exit 0
+  fi
+
+  echo "run: services not healthy yet. restarting..."
+  "$ROOT_DIR/scripts/stop-all.sh" || true
+  sleep 2
+done
+
+echo "run: failed to stabilize backend/frontend after $MAX_ATTEMPTS attempts."
+echo "Recent backend log:"
+tail -n 80 "$ROOT_DIR/.run/backend.log" || true
+echo
+echo "Recent frontend log:"
+tail -n 80 "$ROOT_DIR/.run/frontend.log" || true
+exit 1

@@ -71,6 +71,12 @@ public class AppUser {
     @Column(length = 600)
     private String medicalIllness;
 
+    @Column(length = 1200)
+    private String likedFoods;
+
+    @Column(columnDefinition = "TEXT")
+    private String profileImageUrl;
+
     public AppUser() {
     }
 
@@ -213,5 +219,21 @@ public class AppUser {
 
     public void setMedicalIllness(String medicalIllness) {
         this.medicalIllness = medicalIllness;
+    }
+
+    public String getLikedFoods() {
+        return likedFoods;
+    }
+
+    public void setLikedFoods(String likedFoods) {
+        this.likedFoods = likedFoods;
+    }
+
+    public String getProfileImageUrl() {
+        return profileImageUrl;
+    }
+
+    public void setProfileImageUrl(String profileImageUrl) {
+        this.profileImageUrl = profileImageUrl;
     }
 }

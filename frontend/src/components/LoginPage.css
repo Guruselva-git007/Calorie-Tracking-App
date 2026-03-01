@@ -18,6 +18,26 @@
   overflow: hidden;
 }
 
+.login-mobile-toggle {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 4;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-main);
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.login-mobile-toggle.is-active {
+  border-color: var(--brand-main);
+  background: var(--surface-highlight);
+  color: var(--brand-strong);
+}
+
 .login-card::after {
   content: '';
   position: absolute;
@@ -31,8 +51,8 @@
 
 @media (hover: hover) {
   .login-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 24px 52px rgba(10, 26, 44, 0.25);
+    transform: translateY(-4px);
+    box-shadow: var(--hover-pop-shadow-strong);
   }
 }
 
@@ -185,7 +205,8 @@
   .ghost-btn:hover {
     border-color: var(--line-strong);
     background: var(--surface-3);
-    transform: translateY(-1px);
+    transform: translateY(-2px);
+    box-shadow: var(--hover-pop-shadow);
   }
 }
 
@@ -208,8 +229,23 @@
   font-size: 0.75rem;
 }
 
+.login-shell.is-mobile-preview .login-card {
+  width: min(420px, 100%);
+  border-radius: 18px;
+  padding: 14px;
+}
+
+.login-shell.is-mobile-preview .login-grid-two {
+  grid-template-columns: 1fr;
+}
+
 @media (max-width: 760px) {
   .login-grid-two {
     grid-template-columns: 1fr;
+  }
+
+  .login-mobile-toggle {
+    top: 10px;
+    right: 10px;
   }
 }

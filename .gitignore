@@ -8,6 +8,7 @@ backend/mvnw.cmd
 frontend/node_modules/
 frontend/build/
 frontend/.env
+.env.deploy
 
 # IDE
 .idea/
@@ -23,3 +24,9 @@ frontend/.env
 backend/media/
 *.log
 .snapshots/
+
+# Android / Gradle build artifacts
+.gradle/
+frontend/android/.gradle/
+frontend/android/app/build/
+*.apk

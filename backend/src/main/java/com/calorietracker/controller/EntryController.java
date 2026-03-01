@@ -74,6 +74,11 @@ public class EntryController {
         response.setTotalCalories(CalorieMath.round(totalCalories));
         response.setRemainingCalories(CalorieMath.round(user.getDailyCalorieGoal() - totalCalories));
         response.setEntryCount(entries.size());
+        EntryService.MacroTotals macros = entryService.getMacroTotalsForDate(userId, targetDate);
+        response.setTotalProtein(macros.getProtein());
+        response.setTotalCarbs(macros.getCarbs());
+        response.setTotalFats(macros.getFats());
+        response.setTotalFiber(macros.getFiber());
         return response;
     }
 

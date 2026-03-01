@@ -44,6 +44,12 @@ public class UpdateUserProfileRequest {
     @Size(max = 600)
     private String medicalIllness;
 
+    @Size(max = 1200)
+    private String likedFoods;
+
+    @Size(max = 50000)
+    private String profileImageUrl;
+
     public String getName() {
         return name;
     }
@@ -130,5 +136,21 @@ public class UpdateUserProfileRequest {
 
     public void setMedicalIllness(String medicalIllness) {
         this.medicalIllness = medicalIllness;
+    }
+
+    public String getLikedFoods() {
+        return likedFoods;
+    }
+
+    public void setLikedFoods(String likedFoods) {
+        this.likedFoods = likedFoods;
+    }
+
+    public String getProfileImageUrl() {
+        return profileImageUrl;
+    }
+
+    public void setProfileImageUrl(String profileImageUrl) {
+        this.profileImageUrl = profileImageUrl;
     }
 }

@@ -229,7 +229,16 @@ public final class GlobalFoodDataset {
             i("Quinoa Cooked", IngredientCategory.GRAIN, "South American", 120, "1 cup cooked"),
             i("Couscous Cooked", IngredientCategory.GRAIN, "North African", 112, "1 cup cooked"),
             i("Oats Dry", IngredientCategory.GRAIN, "Global", 389, "half cup dry"),
+            i("Dosa Batter Fermented", IngredientCategory.GRAIN, "South Indian", 150, "1 dosa (30 g)"),
+            i("Dosa Plain", IngredientCategory.GRAIN, "South Indian", 168, "1 dosa (90 g)"),
+            i("Idli Steamed", IngredientCategory.GRAIN, "South Indian", 146, "1 idli (50 g)"),
+            i("Idiyappam", IngredientCategory.GRAIN, "South Indian", 159, "1 nest (60 g)"),
+            i("Waffle Plain", IngredientCategory.GRAIN, "Western", 291, "1 waffle (75 g)"),
+            i("Pancake Plain", IngredientCategory.GRAIN, "Western", 227, "1 pancake (60 g)"),
+            i("Scrambled Eggs", IngredientCategory.OTHER, "Western", 148, "1 serving (100 g)"),
+            i("Bacon Strip Cooked", IngredientCategory.MEAT, "Western", 541, "1 strip (12 g)"),
             i("Soy Sauce", IngredientCategory.SAUCE, "Asian", 53, "1 tbsp"),
+            i("Maple Syrup", IngredientCategory.SAUCE, "North American", 260, "1 tbsp (20 g)"),
             i("Fish Sauce", IngredientCategory.SAUCE, "Southeast Asian", 35, "1 tbsp"),
             i("Tamarind Pulp", IngredientCategory.SAUCE, "Indian", 239, "1 tbsp"),
             i("Curry Powder", IngredientCategory.SPICE, "Indian", 325, "1 tbsp"),
@@ -364,6 +373,12 @@ public final class GlobalFoodDataset {
             d("Eastern Seafood Rice", "Eastern", "Rice with mixed seafood and soy notes", c("Jasmine Rice Cooked", 170), c("Shrimp Cooked", 90), c("Squid Cooked", 80), c("Soy Sauce", 9), c("Spring Onion", 25)),
             d("Chinese Chicken Fried Rice", "Chinese", "Classic chicken fried rice", c("White Rice Cooked", 180), c("Chicken Mince Cooked", 90), c("Egg Whole", 60), c("Carrot", 50), c("Soy Sauce", 8)),
             d("Indo Chinese Hakka Noodles", "Indo Chinese", "Stir-fried noodles with vegetables", c("Ramen Noodles Cooked", 190), c("Cabbage", 70), c("Carrot", 60), c("Spring Onion", 25), c("Soy Sauce", 10), c("Sesame Oil", 6)),
+            d("Chicken Noodles", "Indo Chinese", "Classic street-style chicken noodles", c("Ramen Noodles Cooked", 200), c("Chicken Breast Cooked", 120), c("Cabbage", 70), c("Carrot", 60), c("Spring Onion", 28), c("Soy Sauce", 10), c("Sesame Oil", 6)),
+            d("Chicken Hakka Noodles", "Indo Chinese", "Chicken hakka noodles with crunchy vegetables", c("Ramen Noodles Cooked", 200), c("Chicken Mince Cooked", 120), c("Cabbage", 75), c("Carrot", 60), c("Spring Onion", 28), c("Soy Sauce", 10), c("Sesame Oil", 6)),
+            d("Chicken Chow Mein", "Chinese", "Stir-fried chicken chow mein noodles", c("Ramen Noodles Cooked", 195), c("Chicken Breast Cooked", 120), c("Cabbage", 70), c("Carrot", 55), c("Spring Onion", 25), c("Soy Sauce", 10), c("Sesame Oil", 6)),
+            d("Chilli Chicken", "Indo Chinese", "Popular Indo Chinese chilli chicken", c("Chicken Thigh Cooked", 170), c("Bell Pepper", 90), c("Onion", 70), c("Soy Sauce", 12), c("Sesame Oil", 8), c("Garlic", 10)),
+            d("Chili Chicken", "Indo Chinese", "Regional spelling variant of chilli chicken", c("Chicken Thigh Cooked", 170), c("Bell Pepper", 90), c("Onion", 70), c("Soy Sauce", 12), c("Sesame Oil", 8), c("Garlic", 10)),
+            d("Chicken Chilli Gravy", "Indo Chinese", "Chicken chilli gravy with onion and peppers", c("Chicken Thigh Cooked", 165), c("Bell Pepper", 95), c("Onion", 80), c("Chicken Soup Base", 120), c("Soy Sauce", 12), c("Sesame Oil", 8), c("Garlic", 10)),
             d("Mediterranean Fish Plate", "Mediterranean", "Pan fish with vegetables and olive oil", c("Sea Bass Cooked", 140), c("Tomato", 80), c("Cucumber", 70), c("Olive Oil", 9), c("Lemon Juice", 12)),
             d("Indian Chicken Soup Bowl", "Indian", "Comfort chicken soup with spices", c("Chicken Soup Base", 260), c("Chicken Breast Cooked", 100), c("Carrot", 50), c("Onion", 45), c("Garam Masala", 3)),
 
@@ -386,7 +401,16 @@ public final class GlobalFoodDataset {
             d("South Indian Veg Thali", "Indian", "Balanced vegetarian thali meal plate", c("White Rice Cooked", 180), c("Lentils Cooked", 130), c("Spinach", 80), c("Curd", 100), c("Potato", 90)),
             d("South Indian Non Veg Thali", "Indian", "Traditional non-veg thali meal plate", c("White Rice Cooked", 180), c("Chicken Thigh Cooked", 150), c("Lentils Cooked", 90), c("Curd", 80), c("Onion", 45)),
             d("Veg Meals Plate", "Indian", "Daily style veg meals with rice and lentils", c("Brown Rice Cooked", 170), c("Lentils Cooked", 130), c("Carrot", 70), c("Peas", 70), c("Curd", 90)),
-            d("Non Veg Meals Plate", "Indian", "Daily style non-veg meals with rice and chicken", c("White Rice Cooked", 170), c("Chicken Breast Cooked", 150), c("Lentils Cooked", 90), c("Onion", 50), c("Curd", 70))
+            d("Non Veg Meals Plate", "Indian", "Daily style non-veg meals with rice and chicken", c("White Rice Cooked", 170), c("Chicken Breast Cooked", 150), c("Lentils Cooked", 90), c("Onion", 50), c("Curd", 70)),
+
+            d("Plain Dosa", "South Indian", "Crispy fermented rice-lentil dosa", c("Dosa Batter Fermented", 120), c("Groundnut Oil", 6)),
+            d("Masala Dosa", "South Indian", "Dosa with potato masala filling", c("Dosa Batter Fermented", 130), c("Potato", 140), c("Onion", 45), c("Mustard Oil", 6)),
+            d("Steamed Idli Plate", "South Indian", "Soft steamed idli breakfast plate", c("Idli Steamed", 200), c("Lentils Cooked", 100), c("Tomato", 80), c("Onion", 35), c("Curry Powder", 3)),
+            d("Idiyappam Coconut Bowl", "South Indian", "String hoppers with coconut milk", c("Idiyappam", 220), c("Coconut Milk", 90), c("Coconut Flesh", 30)),
+            d("Waffle Plate", "Western", "Waffles with butter and syrup", c("Waffle Plain", 170), c("Butter Unsalted", 8), c("Maple Syrup", 24)),
+            d("Pancake Stack", "Western", "Classic pancakes with syrup", c("Pancake Plain", 190), c("Butter Unsalted", 8), c("Maple Syrup", 24)),
+            d("Scrambled Eggs Plate", "Western", "Creamy scrambled eggs breakfast", c("Scrambled Eggs", 180), c("Butter Unsalted", 6), c("Tomato", 50)),
+            d("Bacon And Eggs Breakfast", "European", "Scrambled eggs with crispy bacon", c("Scrambled Eggs", 180), c("Bacon Strip Cooked", 36), c("Tomato", 50))
         );
     }
 

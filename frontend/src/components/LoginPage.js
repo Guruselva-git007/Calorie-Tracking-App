@@ -1,10 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { authAPI, describeApiError, getApiBase, setAuthToken } from '../services/api';
 import './LoginPage.css';
 
 const isEmail = (value) => /\S+@\S+\.\S+/.test(value);
+const BACKEND_RETRY_MS_DOWN = 2500;
+const BACKEND_RETRY_MS_UP = 12000;
 
-function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
+function LoginPage({
+  onAuthenticated,
+  initialStatus = '',
+  onRetryBackend,
+  mobilePreviewEnabled = false,
+  onToggleMobilePreview
+}) {
   const [mode, setMode] = useState('email');
   const [name, setName] = useState('');
   const [nickname, setNickname] = useState('');
@@ -19,14 +27,15 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
   const [expiresAt, setExpiresAt] = useState('');
   const [backendReady, setBackendReady] = useState(false);
   const [backendChecking, setBackendChecking] = useState(true);
-
-  const backendHint = useMemo(() => getApiBase(), []);
+  const [backendHint, setBackendHint] = useState(() => getApiBase());
 
   const probeBackend = useCallback(
     async (showFailureMessage = false) => {
+      setBackendHint(getApiBase());
       try {
         setBackendChecking(true);
-        await authAPI.ping();
+        await authAPI.ping(2400);
+        setBackendHint(getApiBase());
         setBackendReady(true);
         setStatus((previous) => {
           const text = String(previous || '').toLowerCase();
@@ -37,16 +46,17 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
         });
         return true;
       } catch (error) {
+        setBackendHint(getApiBase());
         setBackendReady(false);
         if (showFailureMessage) {
-          setStatus(describeApiError(error, `Unable to reach backend at ${backendHint}.`));
+          setStatus(describeApiError(error, `Unable to reach backend at ${getApiBase()}.`));
         }
         return false;
       } finally {
         setBackendChecking(false);
       }
     },
-    [backendHint]
+    []
   );
 
   useEffect(() => {
@@ -56,12 +66,19 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
   }, [initialStatus]);
 
   useEffect(() => {
+    let timer;
     probeBackend(Boolean(initialStatus));
-    const timer = window.setInterval(() => {
-      probeBackend(false);
-    }, 20000);
-    return () => window.clearInterval(timer);
-  }, [initialStatus, probeBackend]);
+    timer = window.setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        probeBackend(false);
+      }
+    }, backendReady ? BACKEND_RETRY_MS_UP : BACKEND_RETRY_MS_DOWN);
+    return () => {
+      if (timer) {
+        window.clearInterval(timer);
+      }
+    };
+  }, [initialStatus, probeBackend, backendReady]);
 
   const resetVerificationState = () => {
     setStep('request');
@@ -74,6 +91,13 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
   const handleRequestCode = async (event) => {
     event.preventDefault();
     setStatus('');
+
+    if (!backendReady) {
+      const readyNow = await probeBackend(true);
+      if (!readyNow) {
+        return;
+      }
+    }
 
     const payload = {
       name: name.trim() || undefined,
@@ -114,6 +138,13 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
     event.preventDefault();
     setStatus('');
 
+    if (!backendReady) {
+      const readyNow = await probeBackend(true);
+      if (!readyNow) {
+        return;
+      }
+    }
+
     if (code.trim().length < 4) {
       setStatus('Enter the verification code.');
       return;
@@ -153,6 +184,13 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
   const handleGuestLogin = async () => {
     setStatus('');
 
+    if (!backendReady) {
+      const readyNow = await probeBackend(true);
+      if (!readyNow) {
+        return;
+      }
+    }
+
     try {
       setBusy(true);
       const response = await authAPI.guest({
@@ -183,8 +221,15 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
   };
 
   return (
-    <div className="login-shell">
+    <div className={`login-shell ${mobilePreviewEnabled ? 'is-mobile-preview' : ''}`}>
       <section className="login-card">
+        <button
+          type="button"
+          className={`login-mobile-toggle ${mobilePreviewEnabled ? 'is-active' : ''}`}
+          onClick={() => onToggleMobilePreview?.(!mobilePreviewEnabled)}
+        >
+          {mobilePreviewEnabled ? 'Desktop View' : 'Mobile View'}
+        </button>
         <p className="login-eyebrow">Scholarship Build</p>
         <h1>Calorie Tracker Login</h1>
         <p className="login-subtitle">
@@ -315,7 +360,7 @@ function LoginPage({ onAuthenticated, initialStatus = '', onRetryBackend }) {
             ? 'Checking backend...'
             : backendReady
               ? 'Backend connected'
-              : 'Backend check failed (you can still try login/guest)'}
+              : 'Backend not reachable yet. Retrying automatically...'}
         </div>
 
         {status && <div className="status-line">{status}</div>}

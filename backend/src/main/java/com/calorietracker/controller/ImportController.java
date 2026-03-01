@@ -17,8 +17,10 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.calorietracker.service.ImportJobService;
+import com.calorietracker.service.DatasetCorrectionService;
 import com.calorietracker.service.DummyJsonRecipeImportService;
 import com.calorietracker.service.OpenFoodFactsImportService;
+import com.calorietracker.service.SweetsDatasetImportService;
 import com.calorietracker.service.TheMealDbImportService;
 import com.calorietracker.service.WikimediaImageImportService;
 
@@ -33,11 +35,16 @@ public class ImportController {
     private static final String DEFAULT_GLOBAL_COUNTRIES =
         "india,china,japan,thailand,vietnam,indonesia,philippines,saudi-arabia,turkey,egypt,morocco,nigeria,south-africa,"
             + "united-states,canada,mexico,brazil,argentina,chile,peru,italy,spain,france,germany,united-kingdom,portugal,poland,russia,ukraine,greece,australia";
+    private static final String DEFAULT_DESSERT_COUNTRIES =
+        "india,china,japan,south-korea,thailand,vietnam,indonesia,philippines,italy,france,germany,spain,greece,turkey,"
+            + "united-kingdom,united-states,mexico,brazil,argentina,south-africa,nigeria,australia";
 
     private final OpenFoodFactsImportService openFoodFactsImportService;
     private final TheMealDbImportService theMealDbImportService;
     private final DummyJsonRecipeImportService dummyJsonRecipeImportService;
     private final WikimediaImageImportService wikimediaImageImportService;
+    private final SweetsDatasetImportService sweetsDatasetImportService;
+    private final DatasetCorrectionService datasetCorrectionService;
     private final ImportJobService importJobService;
     private final AtomicBoolean importInProgress = new AtomicBoolean(false);
 
@@ -46,12 +53,16 @@ public class ImportController {
         TheMealDbImportService theMealDbImportService,
         DummyJsonRecipeImportService dummyJsonRecipeImportService,
         WikimediaImageImportService wikimediaImageImportService,
+        SweetsDatasetImportService sweetsDatasetImportService,
+        DatasetCorrectionService datasetCorrectionService,
         ImportJobService importJobService
     ) {
         this.openFoodFactsImportService = openFoodFactsImportService;
         this.theMealDbImportService = theMealDbImportService;
         this.dummyJsonRecipeImportService = dummyJsonRecipeImportService;
         this.wikimediaImageImportService = wikimediaImageImportService;
+        this.sweetsDatasetImportService = sweetsDatasetImportService;
+        this.datasetCorrectionService = datasetCorrectionService;
         this.importJobService = importJobService;
     }
 
@@ -240,6 +251,84 @@ public class ImportController {
         );
     }
 
+    @PostMapping("/sweets-desserts")
+    public Map<String, Object> importSweetsDesserts(
+        @RequestParam(defaultValue = DEFAULT_DESSERT_COUNTRIES) String countries,
+        @RequestParam(defaultValue = "1") Integer pages,
+        @RequestParam(defaultValue = "120") Integer pageSize,
+        @RequestParam(defaultValue = "14") Integer maxPerQuery,
+        @RequestParam(defaultValue = "140") Integer maxMealDbDesserts,
+        @RequestParam(defaultValue = "true") Boolean includeCuratedFallback
+    ) {
+        return runImportExclusively(
+            () -> buildSweetsDessertImport(
+                countries,
+                pages,
+                pageSize,
+                maxPerQuery,
+                maxMealDbDesserts,
+                includeCuratedFallback
+            )
+        );
+    }
+
+    @PostMapping("/sweets-desserts/async")
+    public Map<String, Object> importSweetsDessertsAsync(
+        @RequestParam(defaultValue = DEFAULT_DESSERT_COUNTRIES) String countries,
+        @RequestParam(defaultValue = "1") Integer pages,
+        @RequestParam(defaultValue = "120") Integer pageSize,
+        @RequestParam(defaultValue = "14") Integer maxPerQuery,
+        @RequestParam(defaultValue = "140") Integer maxMealDbDesserts,
+        @RequestParam(defaultValue = "true") Boolean includeCuratedFallback
+    ) {
+        String jobId = importJobService.submit(
+            "SWEETS_DATASETS",
+            () -> runImportExclusively(
+                () -> buildSweetsDessertImport(
+                    countries,
+                    pages,
+                    pageSize,
+                    maxPerQuery,
+                    maxMealDbDesserts,
+                    includeCuratedFallback
+                )
+            )
+        );
+
+        return Map.of(
+            "status", "accepted",
+            "jobId", jobId,
+            "poll", "/api/import/jobs/" + jobId
+        );
+    }
+
+    @PostMapping("/correct-datasets")
+    public Map<String, Object> correctDatasets(
+        @RequestParam(defaultValue = "true") Boolean promoteFactChecked
+    ) {
+        return runImportExclusively(
+            () -> buildDatasetCorrection(promoteFactChecked)
+        );
+    }
+
+    @PostMapping("/correct-datasets/async")
+    public Map<String, Object> correctDatasetsAsync(
+        @RequestParam(defaultValue = "true") Boolean promoteFactChecked
+    ) {
+        String jobId = importJobService.submit(
+            "DATASET_CORRECTION",
+            () -> runImportExclusively(
+                () -> buildDatasetCorrection(promoteFactChecked)
+            )
+        );
+
+        return Map.of(
+            "status", "accepted",
+            "jobId", jobId,
+            "poll", "/api/import/jobs/" + jobId
+        );
+    }
+
     @GetMapping("/jobs/{jobId}")
     public Map<String, Object> getJobStatus(@PathVariable String jobId) {
         return importJobService.getJobOrThrow(jobId);
@@ -361,6 +450,28 @@ public class ImportController {
         response.put("source", "Wikimedia Commons");
         response.putAll(result);
         return response;
+    }
+
+    private Map<String, Object> buildSweetsDessertImport(
+        String countries,
+        Integer pages,
+        Integer pageSize,
+        Integer maxPerQuery,
+        Integer maxMealDbDesserts,
+        Boolean includeCuratedFallback
+    ) {
+        return sweetsDatasetImportService.importSweetsAndDesserts(
+            parseCsv(countries),
+            pages,
+            pageSize,
+            maxPerQuery,
+            maxMealDbDesserts,
+            Boolean.TRUE.equals(includeCuratedFallback)
+        );
+    }
+
+    private Map<String, Object> buildDatasetCorrection(Boolean promoteFactChecked) {
+        return datasetCorrectionService.correctAllDatasets(Boolean.TRUE.equals(promoteFactChecked));
     }
 
     private <T> T runImportExclusively(Supplier<T> action) {

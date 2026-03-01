@@ -1,5 +1,9 @@
 package com.calorietracker.service;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
@@ -14,6 +18,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -34,7 +40,16 @@ public class FoodMetadataService {
     private final Map<String, List<String>> aliasGroups = new LinkedHashMap<>();
     private final Map<String, String> aliasToCanonical = new HashMap<>();
     private final Map<String, Double> currencyRates = new LinkedHashMap<>();
+    private final ConcurrentMap<String, TimedCacheEntry<String>> normalizedTokenCache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, TimedCacheEntry<Set<String>>> expandedTermsCache = new ConcurrentHashMap<>();
     private static final int MAX_IMAGE_URL_LENGTH = 900;
+    private static final int DEFAULT_EXPANDED_TERMS = 14;
+    private static final int MAX_DYNAMIC_SPELLING_VARIANTS = 12;
+    private static final long NORMALIZED_TOKEN_CACHE_TTL_MS = 900_000;
+    private static final int NORMALIZED_TOKEN_CACHE_MAX = 12_000;
+    private static final long EXPANDED_TERMS_CACHE_TTL_MS = 300_000;
+    private static final int EXPANDED_TERMS_CACHE_MAX = 4_000;
+    private static final String EXTRA_ALIAS_RESOURCE = "/aliases/multilingual_food_aliases.tsv";
 
     public FoodMetadataService() {
         initializeMacroProfiles();
@@ -140,8 +155,20 @@ public class FoodMetadataService {
     }
 
     public Set<String> expandSearchTerms(String search) {
+        return expandSearchTerms(search, DEFAULT_EXPANDED_TERMS);
+    }
+
+    public Set<String> expandSearchTerms(String search, int maxTerms) {
         if (!StringUtils.hasText(search)) {
             return Collections.emptySet();
+        }
+
+        int cappedMaxTerms = clampInt(maxTerms, 1, DEFAULT_EXPANDED_TERMS);
+        String normalizedSearch = normalizeToken(search);
+        String cacheKey = normalizedSearch + "|" + cappedMaxTerms;
+        Set<String> cachedExpanded = getCachedExpandedTerms(cacheKey);
+        if (cachedExpanded != null) {
+            return cachedExpanded;
         }
 
         Set<String> terms = new LinkedHashSet<>();
@@ -152,30 +179,32 @@ public class FoodMetadataService {
         terms.add(search.trim());
         terms.add(search.trim().replace("-", " "));
         terms.add(search.trim().replace(" ", ""));
+        terms.add(normalizedSearch);
+        addSpellingVariants(terms, search, 8);
+
+        String phraseCanonical = aliasToCanonical.get(normalizedSearch);
+        if (phraseCanonical != null) {
+            addCanonicalAliasTerms(terms, phraseCanonical, 10);
+        }
 
         for (String token : rawTokens) {
             terms.add(token);
+            addSpellingVariants(terms, token, 4);
 
             String normalizedToken = normalizeToken(token);
             String canonical = aliasToCanonical.get(normalizedToken);
             if (canonical != null) {
-                terms.add(canonical);
-                terms.addAll(aliasGroups.getOrDefault(canonical, List.of()));
+                addCanonicalAliasTerms(terms, canonical, 6);
             }
         }
 
-        String normalizedPhrase = normalizeToken(search);
-        String phraseCanonical = aliasToCanonical.get(normalizedPhrase);
-        if (phraseCanonical != null) {
-            terms.add(phraseCanonical);
-            terms.addAll(aliasGroups.getOrDefault(phraseCanonical, List.of()));
-        }
-
-        return terms.stream()
+        Set<String> expanded = terms.stream()
             .map(String::trim)
             .filter(term -> term.length() >= 2)
-            .limit(14)
+            .limit(cappedMaxTerms)
             .collect(Collectors.toCollection(LinkedHashSet::new));
+        cacheExpandedTerms(cacheKey, expanded);
+        return expanded;
     }
 
     public List<String> buildAliases(String ingredientName) {
@@ -189,9 +218,11 @@ public class FoodMetadataService {
 
         if (canonical != null) {
             aliases.addAll(aliasGroups.getOrDefault(canonical, List.of()));
+            aliases.addAll(buildSpellingVariants(canonical, 8));
         }
 
         String naturalName = ingredientName.trim();
+        aliases.addAll(buildSpellingVariants(naturalName, 10));
         aliases.removeIf(alias -> normalizeToken(alias).equals(normalizedName));
 
         if (naturalName.contains("-")) {
@@ -201,7 +232,7 @@ public class FoodMetadataService {
             aliases.add(naturalName.replace(" ", ""));
         }
 
-        return aliases.stream().limit(15).collect(Collectors.toList());
+        return aliases.stream().limit(18).collect(Collectors.toList());
     }
 
     public List<String> buildRegionalAvailability(String cuisine) {
@@ -346,14 +377,22 @@ public class FoodMetadataService {
             return "";
         }
 
-        String normalized = Normalizer.normalize(text, Normalizer.Form.NFKD)
+        String cacheKey = text.trim();
+        String cached = getCachedNormalizedToken(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
+        String normalized = Normalizer.normalize(cacheKey, Normalizer.Form.NFKD)
             .replaceAll("\\p{M}", "")
             .toLowerCase(Locale.ROOT)
             .replace("&", " and ")
             .replaceAll("[^a-z0-9]+", " ")
             .trim();
 
-        return normalized.replaceAll("\\s+", " ");
+        normalized = normalized.replaceAll("\\s+", " ");
+        cacheNormalizedToken(cacheKey, normalized);
+        return normalized;
     }
 
     private String fallbackFoodImageUrl(String primary, String secondary, String tertiary, String type) {
@@ -434,6 +473,11 @@ public class FoodMetadataService {
     }
 
     private void initializeAliasVocabulary() {
+        registerAliases("indian", "desi", "bharatiya", "hindustani");
+        registerAliases("italian", "italia", "italiano");
+        registerAliases("eastern", "oriental", "east asian", "far east");
+        registerAliases("western", "continental", "occidental", "west style");
+
         registerAliases("biryani", "biriyani", "biriani", "briyani");
         registerAliases("chickpea", "chickpeas", "chana", "garbanzo", "garbanzo bean");
         registerAliases("eggplant", "aubergine", "brinjal", "baingan");
@@ -473,13 +517,81 @@ public class FoodMetadataService {
         registerAliases("flatbread", "roti", "chapati");
         registerAliases("corn tortilla", "makki roti");
         registerAliases("pulao", "pulav", "pilaf", "pilau", "pulaav");
+        registerAliases("dosa", "dosai", "dose", "dosha");
+        registerAliases("idli", "idly", "iddly");
+        registerAliases("idiyappam", "string hopper", "nool puttu", "sevai");
+        registerAliases("waffle", "waffles");
+        registerAliases("pancake", "pancakes", "hotcake");
+        registerAliases("scrambled egg", "scramble egg", "egg scramble");
+        registerAliases("bacon", "bacon strip", "bacon strips");
         registerAliases("curd rice", "thayir sadam", "thayir saadham", "daddojanam", "mosaranna");
         registerAliases("lemon rice", "chitranna", "chitrannam", "nimmakaya pulihora", "elumichai sadam");
         registerAliases("tomato rice", "thakkali sadam", "tomato bath", "tomato baath");
         registerAliases("tamarind rice", "puliyodarai", "puliyogare", "pulihora", "puli sadam");
+        registerAliases("khichdi", "khichri", "kitchari", "kichdi", "kichari");
+        registerAliases("upma", "uppuma", "uppittu", "upittu");
+        registerAliases("poha", "aval", "avalakki", "chivda");
+        registerAliases("uttapam", "uthappam", "oothappam", "utthappam");
+        registerAliases("paratha", "parantha", "prantha", "parotta", "porotta");
+        registerAliases("pakora", "pakoda", "bhajiya", "bajji");
+        registerAliases("payasam", "kheer", "phirni");
+        registerAliases("sambar", "sambhar", "sambaar", "saaru");
+        registerAliases("rasam", "rassam", "saar");
+        registerAliases("chole", "chana masala", "chole masala", "choley", "cholay");
+        registerAliases("rajma chawal", "rajma rice", "kidney bean rice");
+        registerAliases("appam", "hopper", "hoppers", "palappam");
+        registerAliases("pav bhaji", "bhaji pav", "pao bhaji");
+
+        registerAliases("pizza", "piza", "pitsa", "pizzeria pizza");
+        registerAliases("pasta", "macaroni", "maccheroni", "noodle pasta");
+        registerAliases("spaghetti", "spagetti", "spagheti");
+        registerAliases("lasagna", "lasagne", "lasanya");
+        registerAliases("ravioli", "raviolo");
+        registerAliases("tortellini", "tortelini");
+        registerAliases("gnocchi", "nyokki", "nocchi");
+        registerAliases("risotto", "rizotto");
+        registerAliases("focaccia", "focacia");
+        registerAliases("bruschetta", "bruscetta", "brusheta");
+        registerAliases("parmigiana", "parmesan bake", "melanzane parmigiana");
+        registerAliases("bolognese", "bolognaise", "ragu", "ragu alla bolognese");
+        registerAliases("caprese", "insalata caprese", "caprese salad");
+        registerAliases("minestrone", "minestron");
+        registerAliases("gelato", "gelati", "italian ice cream");
+        registerAliases("tiramisu", "tiramisu cake");
+
+        registerAliases("fried rice", "fride rice", "egg fried rice", "chao fan");
+        registerAliases("noodles", "noodle", "mein", "chow mein", "chowmein", "hakka noodles");
+        registerAliases("chow mein", "chowmein", "chao mein");
+        registerAliases("hakka noodles", "hakka noodle", "hakka chowmein");
+        registerAliases("chicken noodles", "chicken noodle", "chicken noodle stir fry", "chicken hakka noodles", "chicken chow mein", "chicken chowmein");
+        registerAliases("chilli chicken", "chili chicken", "chilly chicken", "chicken chilli", "chicken chili", "chilli chicken dry", "chilli chicken gravy");
+        registerAliases("manchurian", "manchuria", "manchuri");
+        registerAliases("dim sum", "dimsum", "yum cha");
+        registerAliases("congee", "jook", "zhou", "kanji rice porridge");
+        registerAliases("ramen", "lamen", "raman");
+        registerAliases("sushi", "maki", "nigiri", "sashimi");
+        registerAliases("kimchi", "gimchi", "kimchee");
+        registerAliases("bibimbap", "bibim bap", "bibimbaap");
+        registerAliases("teriyaki", "teriaki");
+        registerAliases("satay", "sate", "sat e");
+        registerAliases("pho", "pho bo", "pho ga");
+        registerAliases("pad thai", "phad thai", "pat thai");
+        registerAliases("tom yum", "tomyum", "tom yam");
+
+        registerAliases("burger", "hamburger", "veggie burger", "sandwich burger");
+        registerAliases("french fries", "fries", "chips", "potato fries");
+        registerAliases("hot dog", "hotdog", "frankfurter roll");
+        registerAliases("mashed potato", "mashed potatoes", "potato mash");
+        registerAliases("mac and cheese", "mac n cheese", "macaroni cheese");
+        registerAliases("grilled cheese", "cheese toastie", "cheese toasty");
+        registerAliases("donut", "doughnut", "dounut");
+        registerAliases("oatmeal", "porridge", "oat porridge");
+
         registerAliases("veg meals", "veg meal", "vegetarian meal", "vegetarian meals", "veg thali");
         registerAliases("non veg meals", "non veg meal", "nonveg meals", "non vegetarian meal", "non vegetarian meals", "non veg thali");
         registerAliases("thali", "meal plate", "meals plate");
+
+        loadAliasVocabularyFromResource(EXTRA_ALIAS_RESOURCE);
     }
 
     private void initializeCurrencyRates() {
@@ -496,8 +608,14 @@ public class FoodMetadataService {
     }
 
     private void registerAliases(String canonical, String... aliases) {
+        if (!StringUtils.hasText(canonical)) {
+            return;
+        }
+
         List<String> values = new ArrayList<>();
-        values.add(canonical);
+        String canonicalName = canonical.trim();
+        values.add(canonicalName);
+        values.addAll(aliasGroups.getOrDefault(canonicalName, List.of()));
         values.addAll(Arrays.asList(aliases));
 
         List<String> normalized = values.stream()
@@ -505,10 +623,209 @@ public class FoodMetadataService {
             .filter(token -> !token.isBlank())
             .distinct()
             .collect(Collectors.toList());
-        aliasGroups.put(canonical, normalized);
+        aliasGroups.put(canonicalName, normalized);
 
         for (String alias : normalized) {
-            aliasToCanonical.put(normalizeToken(alias), canonical);
+            String normalizedAlias = normalizeToken(alias);
+            if (StringUtils.hasText(normalizedAlias)) {
+                aliasToCanonical.put(normalizedAlias, canonicalName);
+            }
+        }
+    }
+
+    private void addCanonicalAliasTerms(Set<String> terms, String canonical, int maxAliasesToUse) {
+        if (!StringUtils.hasText(canonical)) {
+            return;
+        }
+
+        terms.add(canonical.trim());
+        addSpellingVariants(terms, canonical, 4);
+
+        int used = 0;
+        for (String alias : aliasGroups.getOrDefault(canonical, List.of())) {
+            if (!StringUtils.hasText(alias)) {
+                continue;
+            }
+            terms.add(alias.trim());
+            addSpellingVariants(terms, alias, 3);
+            used++;
+            if (used >= Math.max(1, maxAliasesToUse)) {
+                break;
+            }
+        }
+    }
+
+    private void addSpellingVariants(Set<String> target, String value, int maxVariants) {
+        if (target == null || maxVariants <= 0) {
+            return;
+        }
+        for (String variant : buildSpellingVariants(value, maxVariants)) {
+            target.add(variant);
+        }
+    }
+
+    private List<String> buildSpellingVariants(String value, int maxVariants) {
+        if (!StringUtils.hasText(value)) {
+            return List.of();
+        }
+
+        int cappedMax = clampInt(maxVariants, 1, MAX_DYNAMIC_SPELLING_VARIANTS);
+        String normalized = normalizeToken(value);
+        if (!StringUtils.hasText(normalized)) {
+            return List.of();
+        }
+
+        Set<String> variants = new LinkedHashSet<>();
+        variants.add(normalized);
+        if (normalized.contains(" ")) {
+            variants.add(normalized.replace(" ", ""));
+            variants.add(normalized.replace(" ", "-"));
+        }
+
+        Set<String> baseTokenVariants = buildTokenSpellingVariants(normalized);
+        variants.addAll(baseTokenVariants);
+
+        String[] tokens = normalized.split("\\s+");
+        for (int index = 0; index < tokens.length; index++) {
+            Set<String> tokenVariants = buildTokenSpellingVariants(tokens[index]);
+            for (String tokenVariant : tokenVariants) {
+                if (!StringUtils.hasText(tokenVariant) || tokenVariant.equals(tokens[index])) {
+                    continue;
+                }
+                String[] copy = Arrays.copyOf(tokens, tokens.length);
+                copy[index] = tokenVariant;
+                variants.add(String.join(" ", copy));
+            }
+        }
+
+        return variants.stream()
+            .map(String::trim)
+            .filter(candidate -> candidate.length() >= 2)
+            .limit(cappedMax)
+            .collect(Collectors.toList());
+    }
+
+    private Set<String> buildTokenSpellingVariants(String token) {
+        Set<String> variants = new LinkedHashSet<>();
+        String normalized = normalizeToken(token);
+        if (!StringUtils.hasText(normalized)) {
+            return variants;
+        }
+        variants.add(normalized);
+
+        applyReplacementVariants(variants, "iy", "y");
+        applyReplacementVariants(variants, "yi", "i");
+        applyReplacementVariants(variants, "ia", "ya");
+        applyReplacementVariants(variants, "ya", "ia");
+        applyReplacementVariants(variants, "ya", "iya");
+        applyReplacementVariants(variants, "ia", "iya");
+        applyReplacementVariants(variants, "iya", "ya");
+        applyReplacementVariants(variants, "iya", "ia");
+        applyReplacementVariants(variants, "ie", "i");
+        applyReplacementVariants(variants, "ei", "i");
+        applyReplacementVariants(variants, "ee", "i");
+        applyReplacementVariants(variants, "aa", "a");
+        applyReplacementVariants(variants, "oo", "u");
+        applyReplacementVariants(variants, "ou", "u");
+        applyReplacementVariants(variants, "ck", "k");
+        applyReplacementVariants(variants, "q", "k");
+        applyReplacementVariants(variants, "ph", "f");
+        applyReplacementVariants(variants, "w", "v");
+        applyReplacementVariants(variants, "v", "w");
+        applyReplacementVariants(variants, "z", "s");
+        applyReplacementVariants(variants, "s", "z");
+        applyReplacementVariants(variants, "chili", "chilli");
+        applyReplacementVariants(variants, "chilli", "chili");
+        applyReplacementVariants(variants, "th", "t");
+        applyReplacementVariants(variants, "dh", "d");
+        applyReplacementVariants(variants, "bh", "b");
+        applyReplacementVariants(variants, "gh", "g");
+        applyReplacementVariants(variants, "kh", "k");
+        applyReplacementVariants(variants, "ll", "l");
+        applyReplacementVariants(variants, "tt", "t");
+        applyReplacementVariants(variants, "rr", "r");
+        applyReplacementVariants(variants, "nn", "n");
+
+        List<String> snapshot = new ArrayList<>(variants);
+        for (String candidate : snapshot) {
+            if (candidate.length() > 4 && candidate.endsWith("ies")) {
+                variants.add(candidate.substring(0, candidate.length() - 3) + "y");
+            }
+            if (candidate.length() > 4 && candidate.endsWith("es")) {
+                variants.add(candidate.substring(0, candidate.length() - 2));
+            }
+            if (candidate.length() > 3 && candidate.endsWith("s") && !candidate.endsWith("ss")) {
+                variants.add(candidate.substring(0, candidate.length() - 1));
+            }
+            if (candidate.length() > 3 && candidate.endsWith("y")) {
+                variants.add(candidate.substring(0, candidate.length() - 1) + "i");
+                variants.add(candidate.substring(0, candidate.length() - 1) + "ie");
+            }
+            if (candidate.length() > 3 && candidate.endsWith("i")) {
+                variants.add(candidate.substring(0, candidate.length() - 1) + "y");
+            }
+            if (candidate.length() > 4 && candidate.endsWith("ie")) {
+                variants.add(candidate.substring(0, candidate.length() - 2) + "y");
+            }
+        }
+
+        return variants.stream()
+            .map(String::trim)
+            .filter(candidate -> candidate.length() >= 2)
+            .limit(MAX_DYNAMIC_SPELLING_VARIANTS)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private void applyReplacementVariants(Set<String> variants, String from, String to) {
+        if (variants == null || !StringUtils.hasText(from) || !StringUtils.hasText(to)) {
+            return;
+        }
+        List<String> snapshot = new ArrayList<>(variants);
+        for (String candidate : snapshot) {
+            if (candidate.contains(from)) {
+                variants.add(candidate.replace(from, to));
+            }
+        }
+    }
+
+    private void loadAliasVocabularyFromResource(String resourcePath) {
+        if (!StringUtils.hasText(resourcePath)) {
+            return;
+        }
+
+        InputStream input = FoodMetadataService.class.getResourceAsStream(resourcePath);
+        if (input == null) {
+            return;
+        }
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                    continue;
+                }
+
+                String[] parts = trimmed.split("\t", 2);
+                if (!StringUtils.hasText(parts[0])) {
+                    continue;
+                }
+
+                String canonical = parts[0].trim();
+                if (parts.length == 1 || !StringUtils.hasText(parts[1])) {
+                    registerAliases(canonical);
+                    continue;
+                }
+
+                String[] aliases = Arrays.stream(parts[1].split("\\|"))
+                    .map(String::trim)
+                    .filter(StringUtils::hasText)
+                    .distinct()
+                    .toArray(String[]::new);
+                registerAliases(canonical, aliases);
+            }
+        } catch (IOException ignored) {
+            // Ignore optional external vocabulary load failures.
         }
     }
 
@@ -523,6 +840,65 @@ public class FoodMetadataService {
 
     private double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private String getCachedNormalizedToken(String key) {
+        TimedCacheEntry<String> entry = normalizedTokenCache.get(key);
+        if (entry == null) {
+            return null;
+        }
+        if (System.currentTimeMillis() - entry.cachedAtMs() > NORMALIZED_TOKEN_CACHE_TTL_MS) {
+            normalizedTokenCache.remove(key, entry);
+            return null;
+        }
+        return entry.value();
+    }
+
+    private void cacheNormalizedToken(String key, String value) {
+        normalizedTokenCache.put(key, new TimedCacheEntry<>(value, System.currentTimeMillis()));
+        if (normalizedTokenCache.size() > NORMALIZED_TOKEN_CACHE_MAX) {
+            pruneOldestCacheEntry(normalizedTokenCache);
+        }
+    }
+
+    private Set<String> getCachedExpandedTerms(String key) {
+        TimedCacheEntry<Set<String>> entry = expandedTermsCache.get(key);
+        if (entry == null) {
+            return null;
+        }
+        if (System.currentTimeMillis() - entry.cachedAtMs() > EXPANDED_TERMS_CACHE_TTL_MS) {
+            expandedTermsCache.remove(key, entry);
+            return null;
+        }
+        return new LinkedHashSet<>(entry.value());
+    }
+
+    private void cacheExpandedTerms(String key, Set<String> value) {
+        expandedTermsCache.put(key, new TimedCacheEntry<>(Collections.unmodifiableSet(new LinkedHashSet<>(value)), System.currentTimeMillis()));
+        if (expandedTermsCache.size() > EXPANDED_TERMS_CACHE_MAX) {
+            pruneOldestCacheEntry(expandedTermsCache);
+        }
+    }
+
+    private <T> void pruneOldestCacheEntry(ConcurrentMap<String, TimedCacheEntry<T>> cache) {
+        String oldestKey = null;
+        long oldestTime = Long.MAX_VALUE;
+        for (Map.Entry<String, TimedCacheEntry<T>> entry : cache.entrySet()) {
+            if (entry.getValue().cachedAtMs() < oldestTime) {
+                oldestTime = entry.getValue().cachedAtMs();
+                oldestKey = entry.getKey();
+            }
+        }
+        if (oldestKey != null) {
+            cache.remove(oldestKey);
+        }
+    }
+
+    private record TimedCacheEntry<T>(T value, long cachedAtMs) {
     }
 
     public record NutritionProfile(

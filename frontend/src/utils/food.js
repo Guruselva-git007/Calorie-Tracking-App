@@ -1,4 +1,4 @@
-export const UNIT_OPTIONS = ['g', 'kg', 'ml', 'l'];
+export const UNIT_OPTIONS = ['g', 'kg', 'ml', 'l', 'serving', 'count'];
 export const WEIGHT_PRESETS = [50, 100, 250, 500, 750, 1000];
 export const USD_TO_INR_RATE = 83;
 
@@ -43,10 +43,44 @@ export const parseNumber = (value, fallback = 0) => {
   return Number.isFinite(next) ? next : fallback;
 };
 
-export const toGrams = (quantity, unit) => {
+const SERVING_GRAMS_FALLBACK = 100;
+const SERVING_GRAMS_REGEX = /([0-9]+(?:\.[0-9]+)?)\s*(kg|g|grams?|ml|l|liters?|litres?)\b/i;
+
+const unitToGramsMultiplier = (unit) => {
+  const normalized = normalizeText(unit);
+  if (normalized === 'kg' || normalized === 'l' || normalized === 'liter' || normalized === 'liters' || normalized === 'litre' || normalized === 'litres') {
+    return 1000;
+  }
+  return 1;
+};
+
+export const extractServingSizeInGrams = (ingredient, fallback = SERVING_GRAMS_FALLBACK) => {
+  const note = String(ingredient?.servingNote || '').trim();
+  if (!note) {
+    return fallback;
+  }
+
+  const match = note.match(SERVING_GRAMS_REGEX);
+  if (!match) {
+    return fallback;
+  }
+
+  const value = parseNumber(match[1], fallback);
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  return value * unitToGramsMultiplier(match[2]);
+};
+
+export const toGrams = (quantity, unit, ingredient = null) => {
   const amount = Math.max(0, parseNumber(quantity, 0));
   const normalizedUnit = normalizeText(unit);
 
+  if (normalizedUnit === 'serving' || normalizedUnit === 'servings' || normalizedUnit === 'count' || normalizedUnit === 'counts') {
+    const servingSize = extractServingSizeInGrams(ingredient);
+    return amount * servingSize;
+  }
   if (normalizedUnit === 'kg' || normalizedUnit === 'l') {
     return amount * 1000;
   }
@@ -55,10 +89,66 @@ export const toGrams = (quantity, unit) => {
 
 export const getUnitStepForTenGrams = (unit) => {
   const normalizedUnit = normalizeText(unit);
+  if (normalizedUnit === 'serving' || normalizedUnit === 'servings' || normalizedUnit === 'count' || normalizedUnit === 'counts') {
+    return 1;
+  }
   if (normalizedUnit === 'kg' || normalizedUnit === 'l') {
     return 0.01;
   }
   return 10;
+};
+
+const formatStepValue = (value) => (Math.abs(value - Math.round(value)) < 0.0001 ? `${Math.round(value)}` : value.toFixed(2));
+
+const singularUnitLabel = (unit) => {
+  const normalized = normalizeText(unit);
+  if (normalized === 'servings') {
+    return 'serving';
+  }
+  if (normalized === 'counts') {
+    return 'count';
+  }
+  return normalized || 'g';
+};
+
+export const getQuantityInputStep = (unit) => {
+  const normalized = normalizeText(unit);
+  if (normalized === 'kg' || normalized === 'l') {
+    return '0.01';
+  }
+  return '1';
+};
+
+export const getUnitStepLabel = (unit, direction = 1) => {
+  const sign = direction < 0 ? '-' : '+';
+  const step = getUnitStepForTenGrams(unit);
+  const baseUnit = singularUnitLabel(unit);
+  if (baseUnit === 'serving' || baseUnit === 'count') {
+    return `${sign}${formatStepValue(step)} ${baseUnit}`;
+  }
+  return `${sign}${formatStepValue(step)}${baseUnit}`;
+};
+
+export const getUnitPresets = (unit) => {
+  const baseUnit = singularUnitLabel(unit);
+  if (baseUnit === 'serving' || baseUnit === 'count') {
+    return [1, 2, 3, 4, 5];
+  }
+  return WEIGHT_PRESETS;
+};
+
+export const formatUnitPresetLabel = (value, unit) => {
+  const amount = parseNumber(value, 0);
+  const rounded = Math.abs(amount - Math.round(amount)) < 0.0001 ? Math.round(amount) : Number(amount.toFixed(2));
+  const baseUnit = singularUnitLabel(unit);
+
+  if (baseUnit === 'serving') {
+    return `${rounded} ${rounded === 1 ? 'serving' : 'servings'}`;
+  }
+  if (baseUnit === 'count') {
+    return `${rounded} ${rounded === 1 ? 'count' : 'counts'}`;
+  }
+  return `${rounded}`;
 };
 
 export const lineNutritionFromIngredient = (ingredient, quantity, unit) => {
@@ -74,7 +164,7 @@ export const lineNutritionFromIngredient = (ingredient, quantity, unit) => {
     };
   }
 
-  const grams = toGrams(quantity, unit);
+  const grams = toGrams(quantity, unit, ingredient);
   const ratio = grams / 100;
 
   const calories = parseNumber(ingredient.caloriesPer100g) * ratio;

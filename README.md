@@ -13,16 +13,62 @@ Production-ready full-stack calorie tracker with:
 - Database: MySQL
 - Frontend: React 18 + Axios
 
+## Quality Upgrades (Latest)
+- Faster and more stable one-click startup (`./run`) with process locking and stale-process recovery.
+- Backend startup optimized by reducing heavy dataset scans during boot.
+- Production-friendly frontend API routing: same-domain `/api` is now supported.
+- Configurable CORS via `APP_CORS_ALLOWED_ORIGIN_PATTERNS` for safer deployment.
+- CI pipeline added for backend + frontend build validation (`.github/workflows/ci.yml`).
+
 ## Project Paths
 - `/Users/gs/college/Calorie Tracking App/backend`
 - `/Users/gs/college/Calorie Tracking App/frontend`
 - `/Users/gs/college/Calorie Tracking App/scripts`
 
+## Easy Deployment (Recommended)
+This repo is now deploy-ready with Docker.
+
+Files added:
+- `/Users/gs/college/Calorie Tracking App/docker-compose.deploy.yml`
+- `/Users/gs/college/Calorie Tracking App/.env.deploy.example`
+- `/Users/gs/college/Calorie Tracking App/.env.railway-backend`
+- `/Users/gs/college/Calorie Tracking App/.env.railway-frontend`
+- `/Users/gs/college/Calorie Tracking App/RAILWAY_DEPLOYMENT.md`
+- `/Users/gs/college/Calorie Tracking App/scripts/deploy-docker.sh`
+- `/Users/gs/college/Calorie Tracking App/scripts/deploy-docker-stop.sh`
+- `/Users/gs/college/Calorie Tracking App/backend/Dockerfile`
+- `/Users/gs/college/Calorie Tracking App/frontend/Dockerfile`
+- `/Users/gs/college/Calorie Tracking App/frontend/nginx.template.conf`
+- `/Users/gs/college/Calorie Tracking App/frontend/docker-entrypoint.sh`
+
+Deploy steps:
+1. `cd /Users/gs/college/Calorie\ Tracking\ App`
+2. `cp .env.deploy.example .env.deploy`
+3. Edit `.env.deploy` (set a strong `MYSQL_ROOT_PASSWORD`)
+4. `./scripts/deploy-docker.sh`
+5. Open:
+   - Frontend: `http://localhost:3000`
+   - Backend health: `http://localhost:8080/api/health`
+
+Stop deployment:
+`./scripts/deploy-docker-stop.sh`
+
+Railway checklist:
+- `/Users/gs/college/Calorie Tracking App/RAILWAY_DEPLOYMENT.md`
+- `/Users/gs/college/Calorie Tracking App/RAILWAY_CLICK_CHECKLIST.md`
+
+Public internet access:
+- Temporary public demo URL (works while laptop is online):
+  - `./scripts/start-public-tunnel.sh`
+  - `./scripts/stop-public-tunnel.sh`
+- Permanent Railway deployment (requires one-time `railway login`):
+  - `./scripts/deploy-railway-public.sh`
+
 ## Database Config
 Default backend connection:
 - `DB_URL=jdbc:mysql://localhost:3306/calorie_tracking_app?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC`
 - `DB_USER=root`
-- `DB_PASSWORD=guruselvaselvam1085sql&&&`
+- `DB_PASSWORD=<your-local-mysql-password>`
 
 Override anytime with environment variables.
 
@@ -46,6 +92,64 @@ Stop both:
 ```bash
 ./scripts/stop-all.sh
 ```
+
+## Mobile APK (Android)
+Build a debug APK (with LAN backend URL embedded automatically):
+
+```bash
+cd /Users/gs/college/Calorie\ Tracking\ App
+./scripts/build-android-apk.sh
+```
+
+APK output:
+- `/Users/gs/college/Calorie Tracking App/Calorie-Tracker-debug.apk`
+- `/Users/gs/college/Calorie Tracking App/frontend/android/app/build/outputs/apk/debug/app-debug.apk`
+
+## Continuous Auto-Maintenance (New)
+The app now supports continuous automation:
+- Backend auto-refreshes datasets when internet is reachable.
+- Import jobs are scheduled with safe intervals and tracked in MySQL.
+- Background `autopilot` watchdog keeps backend/frontend alive.
+
+Default tuned profile (heavy automation):
+- correction every `4h`
+- Open Food Facts every `6h` (high-volume batch)
+- world cuisines every `8h`
+- sweets/desserts every `12h`
+- image enrichment every `24h`
+
+Manual control:
+
+```bash
+./scripts/start-autopilot.sh
+./scripts/stop-autopilot.sh
+./scripts/status.sh
+```
+
+Automation API:
+- `GET /api/automation/status`
+- `POST /api/automation/trigger?task=manual-next`
+- `POST /api/automation/trigger?task=dataset-correction`
+- `POST /api/automation/trigger?task=open-food-facts`
+- `POST /api/automation/trigger?task=world-cuisines`
+- `POST /api/automation/trigger?task=sweets-desserts`
+- `POST /api/automation/trigger?task=images`
+
+Optional overrides (example):
+```bash
+APP_AUTOMATION_TASK_OPEN_FOOD_FACTS_HOURS=12 \
+APP_AUTOMATION_OPEN_FOOD_FACTS_PAGE_SIZE=160 \
+./scripts/start-all.sh
+```
+
+## Chat Assistant
+- Floating assistant in bottom-left for:
+  - food suggestions
+  - quick navigation tasks
+  - heavy refresh trigger
+  - help/support
+  - direct feedback submission
+- Feedback is stored in MySQL via support APIs.
 
 ## Run Separately
 
@@ -134,6 +238,8 @@ Synchronous endpoints are still available:
 - `GET /api/tools/currencies`
 - `GET /api/stats`
 - `GET /api/perf/summary?limit=20`
+- `GET /api/support/quick-help`
+- `POST /api/support/feedback`
 - `POST /api/auth/request-code`
 - `POST /api/auth/verify-code`
 - `POST /api/auth/guest`

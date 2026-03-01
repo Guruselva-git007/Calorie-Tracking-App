@@ -1,19 +1,24 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
-import AddEntry from './components/AddEntry';
-import Dashboard from './components/Dashboard';
-import FoodLibrary from './components/FoodLibrary';
-import IngredientCalculator from './components/IngredientCalculator';
-import LoginPage from './components/LoginPage';
-import { authAPI, describeApiError, dishAPI, getAuthToken, ingredientAPI, setAuthToken, statsAPI } from './services/api';
+import { authAPI, describeApiError, getAuthToken, setAuthToken, statsAPI } from './services/api';
+import { buildFoodPlaceholderDataUrl, getFoodImageSrc } from './utils/food';
 import './App.css';
 
+const LoginPage = lazy(() => import('./components/LoginPage'));
+const AddEntry = lazy(() => import('./components/AddEntry'));
+const Dashboard = lazy(() => import('./components/Dashboard'));
 const ToolsPage = lazy(() => import('./components/ToolsPage'));
 const SettingsPage = lazy(() => import('./components/SettingsPage'));
+const FoodLibrary = lazy(() => import('./components/FoodLibrary'));
+const IngredientCalculator = lazy(() => import('./components/IngredientCalculator'));
+const ChatAssistant = lazy(() => import('./components/ChatAssistant'));
 
 const THEME_MODE_KEY = 'calorie_theme_mode';
 const THEME_KEY = 'calorie_theme';
 const PAGE_KEY = 'calorie_active_page';
 const PREF_KEY = 'calorie_preferences';
+const MOBILE_PREVIEW_KEY = 'calorie_force_mobile_preview';
+const HOME_UTILITY_KEY = 'calorie_home_utility_tab';
+const HOME_MOBILE_SECTION_KEY = 'calorie_home_mobile_section';
 
 const PAGE_OPTIONS = [
   { id: 'home', label: 'Home' },
@@ -39,6 +44,27 @@ const ThemeAutoIcon = ({ className = '' }) => (
     <circle cx="12" cy="12" r="8.5" />
     <path d="M12 7.4v5l3.4 1.8" />
   </svg>
+);
+
+const MobileNav = ({ currentPage, onPageChange }) => (
+  <nav className="mobile-nav-bar" aria-label="Mobile navigation">
+    <button type="button" onClick={() => onPageChange('home')} className={currentPage === 'home' ? 'active' : ''}>
+      <span aria-hidden="true">🏠</span>
+      <small>Home</small>
+    </button>
+    <button type="button" onClick={() => onPageChange('tools')} className={currentPage === 'tools' ? 'active' : ''}>
+      <span aria-hidden="true">🛠️</span>
+      <small>Tools</small>
+    </button>
+    <button
+      type="button"
+      onClick={() => onPageChange('settings')}
+      className={currentPage === 'settings' ? 'active' : ''}
+    >
+      <span aria-hidden="true">⚙️</span>
+      <small>Settings</small>
+    </button>
+  </nav>
 );
 
 const resolveAutoTheme = (date = new Date()) => {
@@ -78,39 +104,66 @@ const getInitialPage = () => {
 };
 
 const getInitialPreferences = () => {
+  const defaults = {
+    region: 'Global',
+    dietaryPreference: 'No restrictions',
+    currencies: ['INR', 'USD', 'EUR', 'GBP'],
+    voiceRecognitionMode: 'auto'
+  };
+
   if (typeof window === 'undefined') {
-    return {
-      region: 'Global',
-      dietaryPreference: 'No restrictions',
-      currencies: ['INR', 'USD', 'EUR', 'GBP']
-    };
+    return defaults;
   }
 
   const raw = window.localStorage.getItem(PREF_KEY);
   if (!raw) {
-    return {
-      region: 'Global',
-      dietaryPreference: 'No restrictions',
-      currencies: ['INR', 'USD', 'EUR', 'GBP']
-    };
+    return defaults;
   }
 
   try {
     const parsed = JSON.parse(raw);
+    const voiceRecognitionMode = parsed?.voiceRecognitionMode === 'manual' ? 'manual' : 'auto';
     return {
-      region: parsed?.region || 'Global',
-      dietaryPreference: parsed?.dietaryPreference || 'No restrictions',
+      region: parsed?.region || defaults.region,
+      dietaryPreference: parsed?.dietaryPreference || defaults.dietaryPreference,
       currencies: Array.isArray(parsed?.currencies) && parsed.currencies.length
         ? parsed.currencies
-        : ['INR', 'USD', 'EUR', 'GBP']
+        : defaults.currencies,
+      voiceRecognitionMode
     };
   } catch (error) {
-    return {
-      region: 'Global',
-      dietaryPreference: 'No restrictions',
-      currencies: ['INR', 'USD', 'EUR', 'GBP']
-    };
+    return defaults;
   }
+};
+
+const getInitialMobilePreview = () => {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return window.localStorage.getItem(MOBILE_PREVIEW_KEY) === '1';
+};
+
+const getInitialHomeUtilityTab = () => {
+  if (typeof window === 'undefined') {
+    return 'search';
+  }
+  const stored = window.localStorage.getItem(HOME_UTILITY_KEY);
+  return stored === 'ingredients' ? 'ingredients' : 'search';
+};
+
+const getInitialHomeMobileSection = () => {
+  if (typeof window === 'undefined') {
+    return 'log';
+  }
+  const stored = window.localStorage.getItem(HOME_MOBILE_SECTION_KEY);
+  return stored === 'today' || stored === 'log' || stored === 'utility' ? stored : 'log';
+};
+
+const getInitialCompactViewport = () => {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return window.innerWidth <= 920;
 };
 
 function App() {
@@ -129,6 +182,12 @@ function App() {
   const [themeMode, setThemeMode] = useState(getInitialThemeMode);
   const [timeTick, setTimeTick] = useState(() => Date.now());
   const [preferences, setPreferences] = useState(getInitialPreferences);
+  const [mobilePreviewEnabled, setMobilePreviewEnabled] = useState(getInitialMobilePreview);
+  const [homeUtilityTab, setHomeUtilityTab] = useState(getInitialHomeUtilityTab);
+  const [homeMobileSection, setHomeMobileSection] = useState(getInitialHomeMobileSection);
+  const [isCompactViewport, setIsCompactViewport] = useState(getInitialCompactViewport);
+
+  const isCompactHomeLayout = mobilePreviewEnabled || isCompactViewport;
 
   const activeTheme = themeMode === 'auto' ? resolveAutoTheme(new Date(timeTick)) : themeMode;
 
@@ -181,10 +240,6 @@ function App() {
       if (Number.isFinite(ingredients) && Number.isFinite(dishes)) {
         setIngredientsCount(ingredients);
         setDishesCount(dishes);
-      } else {
-        const [ingredientRes, dishRes] = await Promise.all([ingredientAPI.list(), dishAPI.list()]);
-        setIngredientsCount((ingredientRes.data || []).length);
-        setDishesCount((dishRes.data || []).length);
       }
     } catch (loadError) {
       setError(describeApiError(loadError, 'Unable to load backend data. Check backend status and API base URL.'));
@@ -203,6 +258,29 @@ function App() {
     }
     loadDatasetStats();
   }, [currentUser?.id, loadDatasetStats]);
+
+  useEffect(() => {
+    if (!currentUser?.id) {
+      return undefined;
+    }
+
+    const preloadHomeModules = () => {
+      void import('./components/AddEntry');
+      void import('./components/Dashboard');
+      void import('./components/FoodLibrary');
+      void import('./components/IngredientCalculator');
+      void import('./components/ToolsPage');
+      void import('./components/SettingsPage');
+    };
+
+    if ('requestIdleCallback' in window) {
+      const idleId = window.requestIdleCallback(preloadHomeModules, { timeout: 1200 });
+      return () => window.cancelIdleCallback(idleId);
+    }
+
+    const timeoutId = window.setTimeout(preloadHomeModules, 280);
+    return () => window.clearTimeout(timeoutId);
+  }, [currentUser?.id]);
 
   useEffect(() => {
     if (themeMode !== 'auto') {
@@ -227,6 +305,27 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(PREF_KEY, JSON.stringify(preferences));
   }, [preferences]);
+
+  useEffect(() => {
+    window.localStorage.setItem(MOBILE_PREVIEW_KEY, mobilePreviewEnabled ? '1' : '0');
+  }, [mobilePreviewEnabled]);
+
+  useEffect(() => {
+    window.localStorage.setItem(HOME_UTILITY_KEY, homeUtilityTab);
+  }, [homeUtilityTab]);
+
+  useEffect(() => {
+    window.localStorage.setItem(HOME_MOBILE_SECTION_KEY, homeMobileSection);
+  }, [homeMobileSection]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsCompactViewport(window.innerWidth <= 920);
+    };
+
+    window.addEventListener('resize', handleResize, { passive: true });
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     if (!window.matchMedia || !window.matchMedia('(hover: hover)').matches) {
@@ -264,7 +363,11 @@ function App() {
   };
 
   const handlePreferencesChange = (nextPreferences) => {
-    setPreferences(nextPreferences);
+    setPreferences((previous) => ({
+      ...previous,
+      ...(nextPreferences || {}),
+      voiceRecognitionMode: nextPreferences?.voiceRecognitionMode === 'manual' ? 'manual' : 'auto'
+    }));
   };
 
   const handleAuthenticated = (user) => {
@@ -294,17 +397,27 @@ function App() {
     }
   };
 
+  const handleOpenQuickLogger = useCallback(() => {
+    setActivePage('home');
+    window.setTimeout(() => {
+      document.getElementById('quick-add-section')?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start'
+      });
+    }, 90);
+  }, []);
+
   const autoThemeHint = activeTheme === 'dark' ? 'Auto now: Night' : 'Auto now: Day';
   const themeModeIndex = themeMode === 'light' ? 0 : themeMode === 'auto' ? 1 : 2;
 
   const pageHeaderSubtitle = useMemo(() => {
     if (activePage === 'tools') {
-      return 'Deficiency analyzer, medical support tools, and nutrition recommendation engine';
+      return 'Deficiency tools, BMI support, and personalized diet guidance';
     }
     if (activePage === 'settings') {
-      return 'Profile, data import, custom foods, support, and app preferences';
+      return 'Profile, preferences, support, and data controls';
     }
-    return 'Log meals, customize ingredients, and keep your nutrition organized';
+    return 'Quick log meals, scan foods, and track nutrition clearly';
   }, [activePage]);
 
   const userDisplayName = useMemo(() => {
@@ -313,6 +426,23 @@ function App() {
     }
     return currentUser.nickname || currentUser.name || 'User';
   }, [currentUser]);
+
+  const userAvatarFallback = useMemo(
+    () => buildFoodPlaceholderDataUrl(userDisplayName || 'User', 'app-user-avatar'),
+    [userDisplayName]
+  );
+
+  const userAvatarSrc = useMemo(
+    () =>
+      getFoodImageSrc(
+        {
+          name: userDisplayName || 'User',
+          imageUrl: currentUser?.profileImageUrl || ''
+        },
+        { label: userDisplayName || 'User', bucket: 'app-user-avatar' }
+      ),
+    [currentUser?.profileImageUrl, userDisplayName]
+  );
 
   const isGuestMode = useMemo(() => {
     const email = String(currentUser?.email || '').toLowerCase();
@@ -325,23 +455,40 @@ function App() {
 
   if (!currentUser?.id) {
     return (
-      <LoginPage
-        onAuthenticated={handleAuthenticated}
-        initialStatus={sessionRestoreStatus}
-        onRetryBackend={restoreSession}
-      />
+      <Suspense fallback={<div className="app-shell status">Loading login...</div>}>
+        <LoginPage
+          onAuthenticated={handleAuthenticated}
+          initialStatus={sessionRestoreStatus}
+          onRetryBackend={restoreSession}
+          mobilePreviewEnabled={mobilePreviewEnabled}
+          onToggleMobilePreview={setMobilePreviewEnabled}
+        />
+      </Suspense>
     );
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${mobilePreviewEnabled ? ' force-mobile-preview' : ''}`}>
       <header className="hero hero-modern">
         <div className="hero-left">
           <p className="eyebrow">Global Nutrition Studio</p>
           <h1>Calorie Tracker</h1>
           <p className="tagline">{pageHeaderSubtitle}</p>
           <p className="hero-greeting">
-            Welcome, <strong>{userDisplayName}</strong>
+            <span className="hero-avatar">
+              <img
+                src={userAvatarSrc}
+                alt={`${userDisplayName} profile`}
+                data-fallback={userAvatarFallback}
+                onError={(event) => {
+                  event.currentTarget.onerror = null;
+                  event.currentTarget.src = event.currentTarget.dataset.fallback || userAvatarFallback;
+                }}
+              />
+            </span>
+            <span>
+              Welcome, <strong>{userDisplayName}</strong>
+            </span>
             {isGuestMode ? <span className="guest-pill">Guest Mode</span> : null}
           </p>
 
@@ -432,27 +579,95 @@ function App() {
       {!loading && (
         <main className="page-wrap">
           {activePage === 'home' && (
-            <div className="home-grid">
-              <section className="home-slot">
-                <AddEntry userId={currentUser.id} onEntryAdded={onEntriesChanged} />
-              </section>
+            <div className="home-grid home-grid-refined home-grid-lifesum">
+              {isCompactHomeLayout && (
+                <div className="home-mobile-section-switch mode-switch" role="tablist" aria-label="Home sections">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={homeMobileSection === 'today'}
+                    className={homeMobileSection === 'today' ? 'active' : ''}
+                    onClick={() => setHomeMobileSection('today')}
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={homeMobileSection === 'log'}
+                    className={homeMobileSection === 'log' ? 'active' : ''}
+                    onClick={() => setHomeMobileSection('log')}
+                  >
+                    Quick Log
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={homeMobileSection === 'utility'}
+                    className={homeMobileSection === 'utility' ? 'active' : ''}
+                    onClick={() => setHomeMobileSection('utility')}
+                  >
+                    Utilities
+                  </button>
+                </div>
+              )}
 
-              <section className="home-slot">
-                <Dashboard
-                  refreshKey={refreshKey}
-                  userId={currentUser.id}
-                  user={currentUser}
-                  onUserUpdated={handleUserUpdated}
-                />
-              </section>
+              {(!isCompactHomeLayout || homeMobileSection === 'log') && (
+                <section id="quick-add-section" className="home-slot home-slot-log">
+                  <Suspense fallback={<div className="status">Loading quick logger...</div>}>
+                    <AddEntry userId={currentUser.id} onEntryAdded={onEntriesChanged} preferences={preferences} />
+                  </Suspense>
+                </section>
+              )}
 
-              <section className="home-slot">
-                <FoodLibrary />
-              </section>
+              {(!isCompactHomeLayout || homeMobileSection === 'today') && (
+                <section className="home-slot home-slot-today">
+                  <Suspense fallback={<div className="status">Loading dashboard...</div>}>
+                    <Dashboard
+                      refreshKey={refreshKey}
+                      userId={currentUser.id}
+                      user={currentUser}
+                      onUserUpdated={handleUserUpdated}
+                    />
+                  </Suspense>
+                </section>
+              )}
 
-              <section className="home-slot">
-                <IngredientCalculator />
-              </section>
+              {(!isCompactHomeLayout || homeMobileSection === 'utility') && (
+                <section className="home-slot home-slot-utility home-utility-slot">
+                  <div className="panel home-utility-header">
+                    <div className="panel-title-row">
+                      <h2>{homeUtilityTab === 'search' ? 'Food Search' : 'Ingredient Calculator'}</h2>
+                      <div className="mode-switch home-utility-switch">
+                        <button
+                          type="button"
+                          className={homeUtilityTab === 'search' ? 'active' : ''}
+                          onClick={() => setHomeUtilityTab('search')}
+                        >
+                          Search
+                        </button>
+                        <button
+                          type="button"
+                          className={homeUtilityTab === 'ingredients' ? 'active' : ''}
+                          onClick={() => setHomeUtilityTab('ingredients')}
+                        >
+                          Ingredients
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <Suspense
+                    fallback={
+                      <div className="status">
+                        {homeUtilityTab === 'search' ? 'Loading food search...' : 'Loading ingredient calculator...'}
+                      </div>
+                    }
+                  >
+                    {homeUtilityTab === 'search' ? <FoodLibrary /> : <IngredientCalculator />}
+                  </Suspense>
+                </section>
+              )}
             </div>
           )}
 
@@ -475,6 +690,17 @@ function App() {
           )}
         </main>
       )}
+
+      <Suspense fallback={null}>
+        <ChatAssistant
+          user={currentUser}
+          activePage={activePage}
+          onNavigate={setActivePage}
+          onOpenQuickLogger={handleOpenQuickLogger}
+        />
+      </Suspense>
+
+      <MobileNav currentPage={activePage} onPageChange={setActivePage} />
     </div>
   );
 }

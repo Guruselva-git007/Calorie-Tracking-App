@@ -18,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 import com.calorietracker.dto.AuthRequestCodeRequest;
 import com.calorietracker.dto.AuthRequestCodeResponse;
 import com.calorietracker.dto.AuthSessionResponse;
+import com.calorietracker.dto.AuthUserResponse;
 import com.calorietracker.dto.AuthVerifyCodeRequest;
 import com.calorietracker.entity.AppUser;
 import com.calorietracker.entity.AuthVerificationCode;
@@ -182,7 +183,7 @@ public class AuthService {
         AuthSessionResponse response = new AuthSessionResponse();
         response.setToken(session.getSessionToken());
         response.setExpiresAt(session.getExpiresAt());
-        response.setUser(session.getUser());
+        response.setUser(toAuthUserResponse(session.getUser()));
         return response;
     }
 
@@ -297,7 +298,31 @@ public class AuthService {
         AuthSessionResponse response = new AuthSessionResponse();
         response.setToken(session.getSessionToken());
         response.setExpiresAt(session.getExpiresAt());
-        response.setUser(user);
+        response.setUser(toAuthUserResponse(user));
+        return response;
+    }
+
+    private AuthUserResponse toAuthUserResponse(AppUser user) {
+        AuthUserResponse response = new AuthUserResponse();
+        response.setId(user.getId());
+        response.setName(user.getName());
+        response.setNickname(user.getNickname());
+        response.setEmail(user.getEmail());
+        response.setPhone(user.getPhone());
+        response.setEmailVerified(user.getEmailVerified());
+        response.setPhoneVerified(user.getPhoneVerified());
+        response.setDailyCalorieGoal(user.getDailyCalorieGoal());
+        response.setAge(user.getAge());
+        response.setBloodGroup(user.getBloodGroup());
+        response.setHeightCm(user.getHeightCm());
+        response.setWeightKg(user.getWeightKg());
+        response.setRegion(user.getRegion());
+        response.setState(user.getState());
+        response.setCity(user.getCity());
+        response.setNutritionDeficiency(user.getNutritionDeficiency());
+        response.setMedicalIllness(user.getMedicalIllness());
+        response.setLikedFoods(user.getLikedFoods());
+        response.setProfileImageUrl(user.getProfileImageUrl());
         return response;
     }
 

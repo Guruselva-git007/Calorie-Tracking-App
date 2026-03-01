@@ -1,8 +1,9 @@
 package com.calorietracker.service;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,19 +25,22 @@ public class DataSeeder implements CommandLineRunner {
     private final DishRepository dishRepository;
     private final DishComponentRepository dishComponentRepository;
     private final FoodMetadataService foodMetadataService;
+    private final boolean backfillOnStartup;
 
     public DataSeeder(
         AppUserRepository appUserRepository,
         IngredientRepository ingredientRepository,
         DishRepository dishRepository,
         DishComponentRepository dishComponentRepository,
-        FoodMetadataService foodMetadataService
+        FoodMetadataService foodMetadataService,
+        @Value("${app.seed.backfill-on-startup:false}") boolean backfillOnStartup
     ) {
         this.appUserRepository = appUserRepository;
         this.ingredientRepository = ingredientRepository;
         this.dishRepository = dishRepository;
         this.dishComponentRepository = dishComponentRepository;
         this.foodMetadataService = foodMetadataService;
+        this.backfillOnStartup = backfillOnStartup;
     }
 
     @Override
@@ -44,9 +48,11 @@ public class DataSeeder implements CommandLineRunner {
     public void run(String... args) {
         seedDefaultUser();
         seedIngredients();
-        backfillIngredientMetadata();
         seedDishes();
-        backfillDishMetadata();
+        if (backfillOnStartup) {
+            backfillIngredientMetadata();
+            backfillDishMetadata();
+        }
     }
 
     private void seedDefaultUser() {
@@ -56,8 +62,18 @@ public class DataSeeder implements CommandLineRunner {
     }
 
     private void seedIngredients() {
+        int seedCount = GlobalFoodDataset.ingredients().size();
+        long existingCount = ingredientRepository.count();
+        if (existingCount >= seedCount) {
+            return;
+        }
+
+        Set<String> existingNames = new HashSet<>();
+
         for (GlobalFoodDataset.IngredientSeed seed : GlobalFoodDataset.ingredients()) {
-            if (ingredientRepository.existsByNameIgnoreCase(seed.name())) {
+            String normalizedSeedName = foodMetadataService.normalizeToken(seed.name());
+            if (existingNames.contains(normalizedSeedName) || ingredientRepository.existsByNameIgnoreCase(seed.name())) {
+                existingNames.add(normalizedSeedName);
                 continue;
             }
 
@@ -71,6 +87,7 @@ public class DataSeeder implements CommandLineRunner {
             foodMetadataService.applyDefaults(ingredient);
 
             ingredientRepository.save(ingredient);
+            existingNames.add(normalizedSeedName);
         }
     }
 
@@ -115,21 +132,29 @@ public class DataSeeder implements CommandLineRunner {
     }
 
     private void seedDishes() {
-        Map<String, Ingredient> ingredientByName = new HashMap<>();
-        ingredientRepository.findAll().forEach(ingredient -> ingredientByName.put(ingredient.getName(), ingredient));
+        int seedCount = GlobalFoodDataset.dishes().size();
+        long existingCount = dishRepository.count();
+        if (existingCount >= seedCount) {
+            return;
+        }
+
+        Set<String> seededNow = new HashSet<>();
 
         for (GlobalFoodDataset.DishSeed dishSeed : GlobalFoodDataset.dishes()) {
-            if (dishRepository.existsByNameIgnoreCase(dishSeed.name())) {
+            String normalizedDishName = foodMetadataService.normalizeToken(dishSeed.name());
+            if (seededNow.contains(normalizedDishName) || dishRepository.existsByNameIgnoreCase(dishSeed.name())) {
+                seededNow.add(normalizedDishName);
                 continue;
             }
 
             Dish dish = new Dish(dishSeed.name(), dishSeed.cuisine(), dishSeed.description());
             dish.setImageUrl(foodMetadataService.resolveDishImageUrl(null, dishSeed.name(), dishSeed.cuisine()));
             Dish savedDish = dishRepository.save(dish);
+            seededNow.add(normalizedDishName);
 
             for (GlobalFoodDataset.DishComponentSeed componentSeed : dishSeed.components()) {
-                Ingredient ingredient = ingredientByName.get(componentSeed.ingredientName());
-                if (ingredient == null) {
+                Ingredient ingredient = ingredientRepository.findFirstByNameIgnoreCase(componentSeed.ingredientName()).orElse(null);
+                if (ingredient == null || ingredient.getId() == null) {
                     continue;
                 }
 

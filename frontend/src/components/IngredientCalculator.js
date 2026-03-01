@@ -3,17 +3,22 @@ import { calculatorAPI, ingredientAPI } from '../services/api';
 import {
   buildFoodPlaceholderDataUrl,
   UNIT_OPTIONS,
-  WEIGHT_PRESETS,
+  formatUnitPresetLabel,
   formatAmount,
   formatInr,
   getFoodImageSrc,
+  getQuantityInputStep,
+  getUnitPresets,
   getUnitStepForTenGrams,
+  getUnitStepLabel,
   lineNutritionFromIngredient,
   normalizeText,
   parseNumber,
   toGrams
 } from '../utils/food';
 import './IngredientCalculator.css';
+
+const SEARCH_DEBOUNCE_MS = 110;
 
 const createRow = () => ({
   key: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -123,7 +128,7 @@ function IngredientCalculator() {
           setLoadingByRow((previous) => ({ ...previous, [rowKey]: false }));
         }
       }
-    }, 140);
+    }, SEARCH_DEBOUNCE_MS);
   };
 
   const selectIngredient = (rowKey, ingredient) => {
@@ -237,7 +242,7 @@ function IngredientCalculator() {
 
     const payload = usableRows.map((row) => ({
       ingredientId: row.ingredientId,
-      grams: toGrams(row.quantity, row.unit)
+      grams: toGrams(row.quantity, row.unit, row.ingredient)
     }));
 
     try {
@@ -316,12 +321,12 @@ function IngredientCalculator() {
 
             <div className="calc-quantity-row">
               <button type="button" onClick={() => stepRow(row.key, -1)}>
-                -10g
+                {getUnitStepLabel(row.unit, -1)}
               </button>
               <input
                 type="number"
                 min="0"
-                step={row.unit === 'kg' || row.unit === 'l' ? '0.01' : '1'}
+                step={getQuantityInputStep(row.unit)}
                 value={row.quantity}
                 onChange={(event) => updateRow(row.key, { quantity: event.target.value })}
               />
@@ -333,14 +338,14 @@ function IngredientCalculator() {
                 ))}
               </select>
               <button type="button" onClick={() => stepRow(row.key, 1)}>
-                +10g
+                {getUnitStepLabel(row.unit, 1)}
               </button>
             </div>
 
             <div className="calc-preset-row">
-              {WEIGHT_PRESETS.map((value) => (
+              {getUnitPresets(row.unit).map((value) => (
                 <button key={`${row.key}-${value}`} type="button" onClick={() => applyPreset(row.key, value)}>
-                  {value}
+                  {formatUnitPresetLabel(value, row.unit)}
                 </button>
               ))}
             </div>

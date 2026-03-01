@@ -2,13 +2,11 @@ package com.calorietracker.dto;
 
 import java.time.Instant;
 
-import com.calorietracker.entity.AppUser;
-
 public class AuthSessionResponse {
 
     private String token;
     private Instant expiresAt;
-    private AppUser user;
+    private AuthUserResponse user;
 
     public String getToken() {
         return token;
@@ -26,11 +24,11 @@ public class AuthSessionResponse {
         this.expiresAt = expiresAt;
     }
 
-    public AppUser getUser() {
+    public AuthUserResponse getUser() {
         return user;
     }
 
-    public void setUser(AppUser user) {
+    public void setUser(AuthUserResponse user) {
         this.user = user;
     }
 }
